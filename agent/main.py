@@ -15,12 +15,12 @@ graph = build_graph()
 initial_state = {
     "candidate_id": "test-001",
     "candidate_name": "Omar",
-    "current_topic": "background",
+    "current_topic": "",
     "topics_covered": [],
     "questions_asked": [],
     "answers": [],
     "scores": {},
-    "missing_info": ["background", "education", "experience", "skills", "projects"],
+    "missing_info": [],
     "last_question": "",
     "last_answer": "",
     "turn_count": 0,
@@ -30,13 +30,21 @@ initial_state = {
 
 config = {"configurable": {"thread_id": "test-001"}}
 
+# First invocation to start the graph and execute up to the first question generation interrupt
+result = graph.invoke(initial_state, config)
+
 # Simulate a full interview turn by turn
 while True:
-    result = graph.invoke(initial_state, config)
-    print(f"\n🤖 Agent: {result['last_question']}")
     if result["is_complete"]:
         print("\n✅ Interview complete.")
         print(result["final_report"])
         break
+        
+    print(f"\n🤖 Agent: {result['last_question']}")
     user_input = input("You: ")
-    initial_state = {**result, "last_answer": user_input}
+    
+    # Standard LangGraph resume pattern: 
+    # 1. Update the state of the thread checkpoint
+    graph.update_state(config, {"last_answer": user_input})
+    # 2. Resume execution from the checkpoint
+    result = graph.invoke(None, config)
