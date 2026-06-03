@@ -1,12 +1,25 @@
 import os
 from pathlib import Path
+from typing import List
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
 
 # Load variables from the project-root .env file
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+
+# ---------------------------------------------------------------------------
+# Pydantic model for structured evaluation output
+# ---------------------------------------------------------------------------
+class EvaluationResult(BaseModel):
+    score: int = Field(..., ge=1, le=5, description="Score from 1 (weak) to 5 (excellent).")
+    feedback: str = Field(..., description="Professional feedback on the candidate's answer.")
+    needs_probe: bool = Field(..., description="True if a follow-up probe question is warranted.")
+    extracted_skills: List[str] = Field(default_factory=list, description="Explicit technical skills mentioned by the candidate.")
 
 
 def get_program_requirements() -> dict:
@@ -127,7 +140,7 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
             api_key=os.environ.get("OPENROUTER_API_KEY", ""),
         )
         
-        response = eval_llm.invoke(system_prompt)
+        response = eval_llm.invoke([HumanMessage(content=system_prompt)])
         parsed_result = parser.parse(response.content)
         return parsed_result.model_dump()
         
