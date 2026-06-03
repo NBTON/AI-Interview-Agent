@@ -1,14 +1,13 @@
 import os
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_openai import ChatOpenAI
+from pathlib import Path
 
-class EvaluationResult(BaseModel):
-    score: int = Field(..., description="An integer score between 1 and 5 matching the rubric.")
-    feedback: str = Field(..., description="Detailed critique in professional English focusing on technical aspects.")
-    needs_probe: bool = Field(..., description="Whether a follow-up probing question is needed.")
-    extracted_skills: List[str] = Field(..., description="Explicit technical skills, frameworks, or libraries mentioned.")
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+# Load variables from the project-root .env file
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 
 def get_program_requirements() -> dict:
     """
@@ -26,9 +25,48 @@ def get_program_requirements() -> dict:
         }
     }
 
+# Initialise the LLM once at module level via OpenRouter (OpenAI-compatible).
+# The API key is read from the OPENROUTER_API_KEY environment variable.
+_llm = ChatOpenAI(
+    model="openrouter/free",
+    temperature=0.7,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+)
+
+
 def generate_question(topic: str, context: dict, asked_so_far: list) -> str:
-    """STUB — M2 will replace this."""
-    return f"[STUB] Tell me about your {topic}."
+    """Generate a contextual interview question using an LLM via OpenRouter."""
+    skills = context.get("skills_to_assess", [])
+    rubric = context.get("rubric", {})
+
+    system_prompt = (
+        "You are an interviewer conducting a bootcamp admission interview. "
+        "Generate exactly ONE clear, professional question for the candidate. "
+        "Do not include any preamble, explanation, or extra text — only the question itself."
+    )
+
+    asked_text = "\n".join(f"- {q}" for q in asked_so_far) if asked_so_far else "None yet."
+
+    user_prompt = (
+        f"Topic for this question: {topic}\n\n"
+        f"Skills we need to assess: {', '.join(skills)}\n\n"
+        f"Rubric for reference:\n"
+        f"  Excellent: {rubric.get('excellent', 'N/A')}\n"
+        f"  Good: {rubric.get('good', 'N/A')}\n"
+        f"  Weak: {rubric.get('weak', 'N/A')}\n\n"
+        f"Questions already asked:\n{asked_text}\n\n"
+        f"Generate a new, different question about '{topic}' that has NOT been asked yet. "
+        f"If the topic is 'skills', try to probe specific skills from the list. "
+        f"Return only the question."
+    )
+
+    response = _llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ])
+
+    return response.content.strip()
 
 
 
