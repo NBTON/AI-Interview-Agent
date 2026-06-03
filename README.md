@@ -22,12 +22,11 @@ agent/
 
 ### Prerequisites
 - Python 3.11+ (tested up to Python 3.14)
-- `langgraph` package
 
 ### Installation
-Install `langgraph` and its dependencies:
+Install the required dependencies from [requirements.txt](file:///c:/Users/nbton/OneDrive%20-%20KFUPM/Interview_Agent/requirements.txt):
 ```bash
-pip install langgraph
+pip install -r requirements.txt
 ```
 
 ### Running the CLI Simulator
