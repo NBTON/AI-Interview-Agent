@@ -10,3 +10,8 @@ env/
 .idea/
 .vscode/
 .env
+.agents/
+.mcp.json
+skills-lock.json
+
+
