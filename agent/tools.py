@@ -7,9 +7,20 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
+from supabase import create_client, Client
 
 # Load variables from the project-root .env file
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+_supabase_url = os.environ.get("SUPABASE_URL")
+_supabase_key = os.environ.get("SUPABASE_KEY")
+_db_client: Client = None
+
+if _supabase_url and _supabase_key and _supabase_key != "your_supabase_service_role_key_here":
+    try:
+        _db_client = create_client(_supabase_url, _supabase_key)
+    except Exception as e:
+        print(f"Error initializing Supabase client: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +49,39 @@ def get_program_requirements() -> dict:
         }
     }
 
-# Initialise the LLM once at module level via OpenRouter (OpenAI-compatible).
-# The API key is read from the OPENROUTER_API_KEY environment variable.
-_llm = ChatOpenAI(
-    model="openrouter/free",
-    temperature=0.7,
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-)
+openai_key = os.environ.get("OPENAI_API_KEY")
+openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+
+primary_llm = None
+fallback_llm = None
+
+if openai_key:
+    primary_llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.7,
+        api_key=openai_key,
+    )
+
+if openrouter_key:
+    fallback_llm = ChatOpenAI(
+        model="openrouter/free",
+        temperature=0.7,
+        base_url="https://openrouter.ai/api/v1",
+        api_key=openrouter_key,
+    )
+
+if primary_llm and fallback_llm:
+    _llm = primary_llm.with_fallbacks([fallback_llm])
+elif primary_llm:
+    _llm = primary_llm
+elif fallback_llm:
+    _llm = fallback_llm
+else:
+    _llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.7,
+        api_key="",
+    )
 
 
 def generate_question(topic: str, context: dict, asked_so_far: list) -> str:
@@ -133,12 +169,36 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
 
 
     try:
-        eval_llm = ChatOpenAI(
-            model="openrouter/free",
-            temperature=0.0, 
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-        )
+        eval_primary = None
+        eval_fallback = None
+
+        if openai_key:
+            eval_primary = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.0,
+                api_key=openai_key,
+            )
+
+        if openrouter_key:
+            eval_fallback = ChatOpenAI(
+                model="openrouter/free",
+                temperature=0.0,
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_key,
+            )
+
+        if eval_primary and eval_fallback:
+            eval_llm = eval_primary.with_fallbacks([eval_fallback])
+        elif eval_primary:
+            eval_llm = eval_primary
+        elif eval_fallback:
+            eval_llm = eval_fallback
+        else:
+            eval_llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.0,
+                api_key="",
+            )
         
         response = eval_llm.invoke([HumanMessage(content=system_prompt)])
         parsed_result = parser.parse(response.content)
@@ -158,18 +218,61 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
 
 
 def update_candidate_profile(candidate_id: str, topic: str, answer: str, score: int) -> bool:
-    """STUB — M3 will replace this. Must persist to PostgreSQL."""
-    print(f"[STUB] Saving profile for {candidate_id}: {topic} = {score}")
-    return True
+    """Persist candidate progress to PostgreSQL database (Supabase) after each turn."""
+    if not _db_client:
+        print(f"[Fallback/Stub] Saving profile for {candidate_id}: {topic} = {score}")
+        return True
+    try:
+        data = {
+            "candidate_id": candidate_id,
+            "topic": topic,
+            "answer": answer,
+            "score": score
+        }
+        _db_client.table("candidate_responses").insert(data).execute()
+        print(f"Successfully saved turn for {candidate_id} ({topic}) to Supabase.")
+        return True
+    except Exception as e:
+        print(f"Error saving turn for {candidate_id} to Supabase: {e}")
+        return False
 
 def identify_missing_info(topics_covered: list, required_topics: list) -> list:
-    """STUB — M3 will replace this."""
+    """Identifies topics from required list that haven't been covered yet."""
     return [t for t in required_topics if t not in topics_covered]
 
 def calculate_score(scores: dict) -> float:
-    """STUB — M3 will replace this."""
+    """Computes the overall candidate score (rounded to 2 decimal places)."""
     return round(sum(scores.values()) / len(scores), 2) if scores else 0.0
 
 def generate_report(candidate_id: str, scores: dict, answers: list) -> dict:
-    """STUB — M3 will replace this."""
-    return {"candidate_id": candidate_id, "scores": scores, "overall": calculate_score(scores), "summary": "stub report"}
+    """Compiles the final candidate summary report and persists it to the database."""
+    overall_score = calculate_score(scores)
+    covered_topics = list(scores.keys())
+    summary = (
+        f"Candidate {candidate_id} completed the bootcamp candidate interview. "
+        f"Topics covered: {', '.join(covered_topics)}. "
+        f"Scores achieved per topic: {scores}. "
+        f"Overall rating: {overall_score}/5.0."
+    )
+    
+    report = {
+        "candidate_id": candidate_id,
+        "scores": scores,
+        "overall": overall_score,
+        "summary": summary
+    }
+    
+    if _db_client:
+        try:
+            _db_client.table("candidate_reports").upsert({
+                "candidate_id": candidate_id,
+                "scores": scores,
+                "overall": overall_score,
+                "summary": summary
+            }).execute()
+            print(f"Successfully saved final report for {candidate_id} to Supabase.")
+        except Exception as e:
+            print(f"Error saving final report for {candidate_id} to Supabase: {e}")
+            
+    return report
+
