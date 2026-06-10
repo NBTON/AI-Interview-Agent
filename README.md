@@ -1,112 +1,223 @@
 # AI-Interview-Agent
 
-An agentic AI coding assistant designed to conduct turn-by-turn bootcamp candidate interviews. It uses LangGraph to orchestrate state updates, evaluate candidate answers, track topic coverage, and compile final summary reports.
+An agentic AI coding assistant designed to conduct turn-by-turn bootcamp candidate interviews. It uses a **Multi-Agent architecture** built on **LangGraph** to orchestrate state updates, evaluate candidate answers against program rubrics, track topic coverage, update long-term structured memory, and compile final summary reports.
 
 ---
 
-## Directory Layout
+## Architecture Overview
 
-```text
-agent/
-├── state.py          # InterviewState TypedDict definition
-├── tools.py          # Tool contracts and integration stubs
-├── nodes.py          # StateGraph transition nodes
-├── graph.py          # Graph assembly, pass-through routing, and compilation
-├── main.py           # CLI testing runner with Windows terminal compatibility
-└── test_agent.py     # Automated programmatic test suite
+### Multi-Agent State Graph
+
+The interview agent is organized as a state machine. It contains four specialized, cooperative agents that handle different tasks:
+
+```mermaid
+graph TD
+    __start__([Start]) --> init
+    
+    init["init Node<br>• Setup DB Candidate & Session UUIDs<br>• Load program requirements"] 
+    --> router_node
+    
+    router_node{"node_router Router"}
+    
+    router_node -- "evaluate" --> evaluation
+    router_node -- "generate_question" --> interviewer
+    router_node -- "wrap_up" --> wrap_up
+    
+    evaluation["Evaluation Agent<br>• Scores answer (1-5)<br>• Flags needs_probe<br>• Extracts skills/facts"]
+    --> profile_builder["Profile Builder Agent<br>• Updates candidate_profiles JSONB<br>• Updates covered topics"]
+    
+    profile_builder --> router_node
+    
+    interviewer["Interviewer Agent<br>• Generates fresh question or probing follow-up<br>• Logs question to DB"] 
+    -- "Interrupt boundary (Wait for last_answer)" --> evaluation
+    
+    wrap_up["Decision Support Agent<br>• Compiles overall scores<br>• Synthesizes strengths/weaknesses<br>• Generates recommendations"] 
+    --> __end__([End])
+```
+
+### Database Schema (Supabase / PostgreSQL)
+
+The backend uses a normalized 7-table schema to track candidates, profiles (long-term memory), sessions, turns, and final reports:
+
+```mermaid
+erDiagram
+    programs ||--o{ interview_sessions : "has requirements for"
+    candidates ||--|| candidate_profiles : "has structured memory"
+    candidates ||--o{ interview_sessions : "starts"
+    candidates ||--o{ interview_reports : "receives"
+    interview_sessions ||--o{ interview_turns : "comprises"
+    interview_sessions ||--|| interview_reports : "summarized by"
+    interview_sessions ||--o{ conversation_messages : "records history"
+    
+    programs {
+        uuid id PK
+        text name
+        text description
+        jsonb required_topics
+        jsonb skills_to_assess
+        jsonb rubric
+        int max_turns
+    }
+    candidates {
+        uuid id PK
+        text full_name
+        text email
+        text phone
+        text status
+        jsonb metadata
+    }
+    candidate_profiles {
+        uuid id PK
+        uuid candidate_id FK
+        jsonb background
+        jsonb education
+        jsonb experience
+        jsonb skills
+        jsonb projects
+        text strengths
+        text weaknesses
+    }
+    interview_sessions {
+        uuid id PK
+        uuid candidate_id FK
+        uuid program_id FK
+        text status
+        text current_topic
+        text[] topics_covered
+        text[] missing_topics
+        int turn_count
+        jsonb scores
+        timestamptz started_at
+        timestamptz ended_at
+    }
+    interview_turns {
+        uuid id PK
+        uuid session_id FK
+        int turn_number
+        text topic
+        text question
+        text answer
+        int score
+        text feedback
+        boolean needs_probe
+        jsonb extracted_skills
+        jsonb extracted_info
+    }
+    interview_reports {
+        uuid id PK
+        uuid session_id FK
+        uuid candidate_id FK
+        jsonb topic_scores
+        numeric overall_score
+        text summary
+        text recommendation
+        text strengths
+        text weaknesses
+        text decision_notes
+    }
+    conversation_messages {
+        uuid id PK
+        uuid session_id FK
+        text role
+        text content
+        jsonb metadata
+    }
 ```
 
 ---
 
-## Getting Started
+## Agent Roles & Responsibilities
+
+| Agent | Responsibility | Key Actions |
+| :--- | :--- | :--- |
+| **Interviewer Agent** | Conducts conversation & generates questions | Evaluates covered topics to ask the next fresh question, or crafts a targeted probing follow-up if the previous response was weak. Logs questions to `conversation_messages`. |
+| **Evaluation Agent** | Scores answers & extracts structured metadata | Grades candidate answers on a strict 1-5 scale using program rubrics. Extracts skills, constructs `extracted_info` structures (e.g., job titles, universities), and flags `needs_probe` if an answer is too brief/vague. |
+| **Profile Builder Agent** | Consolidates memory & tracks state transitions | Records turns in `interview_turns`. Updates the candidate's structured profile (long-term memory JSONB columns in `candidate_profiles`). Increments `probe_count` or marks topics complete. |
+| **Decision Support Agent** | Compiles final report & recommendations | Runs upon interview completion to average scores, compile strengths and weaknesses using LLM reasoning, output final recommendations (`accept`, `review`, or `reject`), and save to `interview_reports`. |
+
+---
+
+## Expected Flow
+
+1. **Initialization**: The graph starts at the `init` node. It sets up the candidate and session registry inside the database and initializes missing topics (`background`, `education`, `experience`, `skills`, `projects`).
+2. **Interviewer Prompt**: The Interviewer Agent identifies the first topic (`background`), generates a topic-specific question, logs it, and transitions to evaluation.
+3. **Interrupt Boundary**: Because `evaluation` is an interrupt node, the graph pauses execution and waits for candidate input.
+4. **Resuming with Answer**: The candidate supplies an answer, setting `last_answer`. The graph resumes.
+5. **Evaluation & Memory Consolidation**: The Evaluation Agent scores the response. The Profile Builder Agent records the turn, appends extracted facts to `candidate_profiles`, and updates topic coverage.
+6. **Adaptive Probing**: If the Evaluation Agent set `needs_probe = true` (and we have probed less than 2 times on this topic), the topic is *not* marked as covered. The Interviewer Agent will generate a follow-up question related specifically to their previous response.
+7. **Wrap Up**: When all topics are complete, or the turn limit is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
+
+---
+
+## Installation & Running Instructions
 
 ### Prerequisites
-- Python 3.11+ (tested up to Python 3.14)
+- Python 3.11+ (up to Python 3.14)
+- An OpenAI API Key (configured in your `.env` file)
+- (Optional) A Supabase project with migration 002 applied
 
 ### Installation
-Install the required dependencies from [requirements.txt](file:///c:/Users/nbton/OneDrive%20-%20KFUPM/Interview_Agent/requirements.txt):
+Clone the repository and install the dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
+Set up your `.env` file in the root directory:
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+SUPABASE_URL=your_supabase_project_url_here
+SUPABASE_KEY=your_supabase_service_role_key_here
+```
+*Note: If no Supabase URL/Key is provided, the agent automatically falls back to offline/stub mode, printing database operations to the console.*
+
 ### Running the CLI Simulator
-Execute the following command from the project root:
+Execute the interactive turn-by-turn interview simulator:
 ```bash
 python agent/main.py
 ```
 
-### Running Tests
-Execute the automated test suite to assert correct graph transitions and checkpoint handling:
+### Running Automated Tests
+Run the integration test suite to verify graph transitions, adaptive probing, and decision support synthesis:
 ```bash
 python agent/test_agent.py
 ```
 
 ---
 
-## Graph Flow & Integration Points
+## Sample Test Case Output (Adaptive Probing Example)
 
-The agent operates as a state machine orchestrated via LangGraph. 
+Here is an extract from `test_agent.py` showing how the agents coordinate to perform adaptive probing when the candidate provides a brief response for the `skills` topic:
 
-Below is the Mermaid flow diagram of the graph, showing the exact nodes, the interrupt boundaries, and where **M1 [Omar]** and **M2 [Muath]** features integrate:
+```text
+[Simulator] Current Topic: skills
+[Agent Question]: Can you describe a project where you utilized Python for a machine learning application...
+[Candidate Answer]: I am highly proficient in Python, SQL databases, and Machine Learning basics like Scikit-Learn.
 
-```mermaid
-graph TD
-    __start__([Start]) --> init
-    
-    init["init Node<br>• Initializes greeting<br>• Sets missing_info"] 
-    --> router_node
-    
-    router_node["router_node Node<br>• Pass-through node"]
-    
-    router_node --> node_router{node_router Router}
-    
-    node_router -- "evaluate" --> evaluate_and_extract
-    node_router -- "generate_question" --> generate_question
-    node_router -- "wrap_up" --> wrap_up
-    
-    evaluate_and_extract["evaluate_and_extract Node<br>• M2 [Muath]: evaluate_answer()<br>• M1 [Omar] & M2 [Muath]: update_candidate_profile() & identify_missing_info()"] 
-    --> router_node
-    
-    generate_question["generate_question Node<br>• M2 [Muath]: generate_question()"] 
-    -- "Interrupt boundary (Wait for last_answer)" --> evaluate_and_extract
-    
-    wrap_up["wrap_up Node<br>• M1 [Omar] & M2 [Muath]: calculate_score() & generate_report()"] 
-    --> __end__([End])
+🕵️‍♂️ [Evaluation Agent] Evaluating response for topic 'skills'...
+🗂️ [Profile Builder Agent] Saving details & updating memory for 'skills'...
+🔍 [Profile Builder Agent] Topic 'skills' requires follow-up probing (consecutive probes: 1/2).
+
+🎤 [Interviewer Agent] Generating follow-up probing question for topic 'skills'...
+[Evaluation Feedback]: The candidate's response indicates proficiency in Python, SQL databases, and basic ML, but lacks detail on their approach to learning new libraries...
+[Extracted Skills]: ['Python', 'SQL', 'Machine Learning', 'Scikit-Learn']
+[Needs Probe?]: True | [Probe Count]: 1
+
+[Simulator] Current Topic: skills
+[Agent Question]: Can you describe a specific instance where you utilized Scikit-Learn in a project, detailing the steps you took to implement the library and how you communicated your approach to your team?
+[Candidate Answer]: I am highly proficient in Python, SQL databases, and Machine Learning basics like Scikit-Learn.
+
+🕵️‍♂️ [Evaluation Agent] Evaluating response for topic 'skills'...
+🗂️ [Profile Builder Agent] Saving details & updating memory for 'skills'...
+🔍 [Profile Builder Agent] Topic 'skills' requires follow-up probing (consecutive probes: 2/2).
+
+🎤 [Interviewer Agent] Generating follow-up probing question for topic 'skills'...
+[Needs Probe?]: True | [Probe Count]: 2
+
+[Simulator] Current Topic: skills
+[Agent Question]: Can you provide a detailed example of a project where you implemented Scikit-Learn, including the specific algorithms you used, how you preprocessed your data, and any challenges you faced during the implementation?
+[Candidate Answer]: I am highly proficient in Python, SQL databases, and Machine Learning basics like Scikit-Learn.
+
+🕵️‍♂️ [Evaluation Agent] Evaluating response for topic 'skills'...
+🗂️ [Profile Builder Agent] Saving details & updating memory for 'skills'...
+✅ [Profile Builder Agent] Topic 'skills' coverage completed.
 ```
-
-### Integration Details
-
-| Node | Target File | Stub Function | Module Assignment | Purpose |
-| :--- | :--- | :--- | :--- | :--- |
-| `generate_question` | `agent/tools.py` | `generate_question()` | **M2 [Muath]** | Generates the next interview question based on the topic context and asked history. |
-| `evaluate_and_extract` | `agent/tools.py` | `evaluate_answer()` | **M2 [Muath]** | Scores the candidate's last answer and extracts skills. |
-| `evaluate_and_extract` | `agent/tools.py` | `update_candidate_profile()` | **M1 [Omar] & M2 [Muath]** | Persists candidate progress to PostgreSQL database after each turn. |
-| `evaluate_and_extract` | `agent/tools.py` | `identify_missing_info()` | **M1 [Omar] & M2 [Muath]** | Updates candidate covered topics against required syllabus topics. |
-| `wrap_up` | `agent/tools.py` | `calculate_score()` | **M1 [Omar] & M2 [Muath]** | Computes the overall candidate score (rounded to 2 decimal places). |
-| `wrap_up` | `agent/tools.py` | `generate_report()` | **M1 [Omar] & M2 [Muath]** | Compiles the final candidate summary report and persists it to the database. |
-
----
-
-## Technical Details
-
-### AI Inference Architecture (OpenAI with OpenRouter Fallback)
-The LLM inference setup is configured for resilience:
-- **Primary Inference**: Uses the OpenAI API (`gpt-4o-mini`) via `OPENAI_API_KEY`.
-- **Fallback Inference**: If the primary client fails (e.g. rate limits, network error) or the OpenAI key is missing, it automatically falls back to OpenRouter (`openrouter/free`) via `OPENROUTER_API_KEY` using LangChain's native `with_fallbacks` mechanism.
-
-### Database Integration (PostgreSQL / Supabase)
-A robust PostgreSQL database integration (via Supabase client) is implemented to track candidate progress:
-- **Active Tables**:
-  - `candidate_responses` / `candidate_profiles`: Tracks per-turn answers, topics, and scores.
-  - `candidate_reports`: Stores final candidate summaries, overall ratings, and topic scores.
-- **Environment Variables**:
-  - `SUPABASE_URL`: The API URL of your Supabase project.
-  - `SUPABASE_KEY`: The service role API key of your Supabase database.
-
-### State Interrupt & Resuming
-The graph is compiled with `interrupt_before=["evaluate_and_extract"]`. When transitioning from `generate_question` to `evaluate_and_extract`, execution automatically pauses.
-
-To supply the candidate's response and resume the graph:
-1. **Update State**: Use `graph.update_state(config, {"last_answer": user_input})` to write the input value to the checkpoint.
-2. **Resume**: Call `graph.invoke(None, config)` to resume execution from the paused node.
-
