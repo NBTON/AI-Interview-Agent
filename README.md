@@ -177,10 +177,23 @@ python agent/main.py
 ```
 
 ### Running Automated Tests
-Run the integration test suite to verify graph transitions, adaptive probing, and decision support synthesis:
-```bash
-python agent/test_agent.py
-```
+
+We provide two test suites to verify the multi-agent graph:
+
+1. **Basic Flow Verification**: Run a simple single-candidate simulation loop:
+   ```bash
+   python agent/test_agent.py
+   ```
+
+2. **Multi-Scenario Dynamic Test Suite**: Run a comprehensive verification suite that dynamically tests three candidate personas using an LLM-driven candidate simulator to model realistic interview turn interactions:
+   ```bash
+   python agent/test_scenarios.py
+   ```
+
+#### Candidate Personas in `test_scenarios.py`:
+- **Strong Candidate**: Provides detailed, high-quality technical responses on the first try. Progresses directly without triggering probing, achieving a perfect `5.0/5.0` score and an `ACCEPT` recommendation.
+- **Improving Candidate**: Starts with vague/brief answers that trigger adaptive probing. When probed, elaborates with detailed, competent technical responses, resolving the topic and achieving a recommendation of `ACCEPT` or `REVIEW`.
+- **Weak Candidate**: Fails to provide details initially and repeatedly when probed. Triggers the maximum consecutive probes per topic (2 probes) before forcing progress, achieving a low score and a `REJECT` recommendation.
 
 ---
 
