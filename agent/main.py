@@ -15,6 +15,8 @@ graph = build_graph()
 initial_state = {
     "candidate_id": "test-001",
     "candidate_name": "Omar",
+    "session_id": "",
+    "program_id": "",
     "current_topic": "",
     "topics_covered": [],
     "questions_asked": [],
@@ -24,6 +26,11 @@ initial_state = {
     "last_question": "",
     "last_answer": "",
     "turn_count": 0,
+    "probe_count": 0,
+    "needs_probe": False,
+    "extracted_skills": [],
+    "extracted_info": {},
+    "feedback": "",
     "is_complete": False,
     "final_report": None,
 }
@@ -37,7 +44,8 @@ result = graph.invoke(initial_state, config)
 while True:
     if result["is_complete"]:
         print("\n✅ Interview complete.")
-        print(result["final_report"])
+        import json
+        print(json.dumps(result["final_report"], indent=2))
         break
         
     print(f"\n🤖 Agent: {result['last_question']}")
