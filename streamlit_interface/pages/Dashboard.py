@@ -2,52 +2,14 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from fpdf import FPDF
-
+from pathlib import Path
 st.set_page_config(page_title="Recruiter Panel", page_icon="💼", layout="wide")
 
 # -----------------------------
 # CSS
 # -----------------------------
-st.markdown("""
-<style>
-
-.nav-container {
-    display: flex;
-    gap: 30px;
-    margin-bottom: 25px;
-}
-
-.nav-item {
-    padding: 12px 20px;
-    border-radius: 10px;
-    background-color: #f3e8ff;
-    border: 1px solid #d8b4fe;
-    cursor: pointer;
-    font-weight: 600;
-    color: #5b21b6;
-    transition: 0.2s;
-}
-
-.nav-item:hover {
-    background-color: #e9d5ff;
-}
-
-.nav-active {
-    background-color: #c4b5fd !important;
-    color: white !important;
-    border-color: #a78bfa !important;
-}
-
-.section-box {
-    background: white;
-    padding: 25px;
-    border-radius: 15px;
-    border: 1px solid #e5e7eb;
-    box-shadow: 0 4px 10px rgba(0,0,0,.05);
-}
-
-</style>
-""", unsafe_allow_html=True)
+from styles import Dashboard_CSS
+st.markdown(Dashboard_CSS, unsafe_allow_html=True)
 
 # -----------------------------
 # Navigation State
@@ -88,7 +50,9 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<div class="section-box">', unsafe_allow_html=True)
 
 # Load Excel once
-df = pd.read_excel("data/candidates.xlsx")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # Goes up to AI-Interview-Agent/
+EXCEL_PATH = PROJECT_ROOT / "data" / "candidates.xlsx"
+df = pd.read_excel(EXCEL_PATH)
 
 # -----------------------------
 # DASHBOARD PAGE 

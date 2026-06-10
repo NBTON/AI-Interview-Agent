@@ -151,4 +151,3 @@ with col2:
 
     if st.button("Recruiter Login 💼", key="btn_recruiter", use_container_width=True):
         st.switch_page("pages/Recruiter_Login.py")
-
