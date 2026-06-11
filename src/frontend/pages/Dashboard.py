@@ -49,10 +49,32 @@ st.markdown('</div>', unsafe_allow_html=True)
 # -----------------------------
 st.markdown('<div class="section-box">', unsafe_allow_html=True)
 
-# Load Excel once
-PROJECT_ROOT = Path(__file__).resolve().parents[2]  # Goes up to AI-Interview-Agent/
-EXCEL_PATH = PROJECT_ROOT / "data" / "candidates.xlsx"
-df = pd.read_excel(EXCEL_PATH)
+import requests
+
+API_URL = "http://localhost:8000/api"
+
+try:
+    response = requests.get(f"{API_URL}/candidates")
+    if response.status_code == 200:
+        candidates_data = response.json()["candidates"]
+        df = pd.DataFrame(candidates_data)
+        # Standardize columns to match expectations
+        if df.empty:
+            df = pd.DataFrame(columns=["id", "name", "email", "position", "status", "score"])
+        else:
+            if "position" not in df.columns:
+                df["position"] = "Agentic AI"
+            if "score" not in df.columns:
+                df["score"] = 0.0
+            if "status" not in df.columns:
+                df["status"] = "Pending"
+    else:
+        st.error("Failed to load candidate data from backend API.")
+        st.stop()
+except Exception as e:
+    st.error(f"Error connecting to backend API: {e}")
+    st.info("Please make sure the backend uvicorn server is running on http://localhost:8000")
+    st.stop()
 
 # -----------------------------
 # DASHBOARD PAGE 
@@ -275,6 +297,21 @@ elif st.session_state.active_page == "candidates":
     """, unsafe_allow_html=True)
 
     st.dataframe(df, use_container_width=True, height=400)
+
+    # Excel export buffer
+    import io
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Candidates')
+    excel_bytes = buffer.getvalue()
+    
+    st.download_button(
+        label="📥 Export Candidates List to Excel",
+        data=excel_bytes,
+        file_name="candidates_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
 
     # -----------------------------
     # Top 3 Candidates

@@ -149,6 +149,38 @@ erDiagram
 
 ---
 
+## Project Directory Reorganization
+
+The codebase has been reorganized into a structured layout under a `src/` directory to cleanly separate application layers (agent, API backend, and Streamlit frontend):
+
+```
+Interview_Agent/
+├── src/
+│   ├── agent/            # LangGraph agent state machine, nodes, custom tools, and prompt definitions
+│   ├── backend/          # FastAPI API backend routers and server configuration
+│   └── frontend/         # Streamlit recruitment dashboard, candidate verification, and chatbot UI
+├── tests/                # Integration and persona-based simulation tests
+├── data/                 # Local Excel candidate spreadsheets (local fallbacks)
+├── supabase/             # PostgreSQL database schemas and migration scripts
+├── README.md             # Project documentation
+├── pyproject.toml        # Project configuration
+├── requirements.txt      # Project dependencies
+└── .env                  # Environment configurations (API keys, Supabase URLs)
+```
+
+---
+
+## Recent Integration Merge Details
+
+The recent merge successfully unified the Frontend (Streamlit), Backend (FastAPI), and Agent (LangGraph) layers:
+- **Unified Candidate Data Access**: Switched the Streamlit frontend from querying local Excel files directly to querying candidates through the FastAPI backend (`/api/candidates` and `/api/candidates/verify`), ensuring data integrity and database syncing.
+- **Offline and LLM Fallback Robustness**: Integrated OpenRouter models (`nex-agi/nex-n2-pro:free`, etc.) as secondary fallbacks when OpenAI credentials are not provided or rate limits occur. Created local rule-based evaluations for offline candidate scoring and probing, ensuring the system never hangs or crashes without APIs.
+- **Session Identity Propagation**: Fixed candidate verification workflows to store emails in frontend session states, cleanly routing verification states to the interview Chatbot. Added redirect guards to block unverified candidate entries.
+- **DB Syncing & Export**: Integrated candidate dashboard status updates directly with the Supabase database. Added an **Export to Excel** downloader in the Recruiter Dashboard for exporting candidate records on the fly.
+- **Performance Adjustments**: Scaled total interview questions to a consistent 5 required topics and added `120s` thread execution timeouts to prevent hanging calls.
+
+---
+
 ## Installation & Running Instructions
 
 ### Prerequisites
@@ -173,7 +205,7 @@ SUPABASE_KEY=your_supabase_service_role_key_here
 ### Running the CLI Simulator
 Execute the interactive turn-by-turn interview simulator:
 ```bash
-python agent/main.py
+python src/agent/main.py
 ```
 
 ### Running Automated Tests
@@ -257,11 +289,11 @@ To run the complete application, you can start the backend FastAPI server and th
 
 #### 1. Start the Backend API
 ```bash
-uvicorn backend.main:app --reload --port 8000
+uvicorn src.backend.main:app --reload --port 8000
 ```
 
 #### 2. Start the Frontend Interface
 In a new terminal, run:
 ```bash
-streamlit run streamlit_interface/app.py
+streamlit run src/frontend/app.py
 ```

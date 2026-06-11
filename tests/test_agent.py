@@ -1,8 +1,26 @@
 import os
 import sys
+from pathlib import Path
 
 # Ensure the agent directory is in Python path for absolute imports
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+AGENT_DIR = SRC_DIR / "agent"
+
+# Move any paths containing the local 'supabase' folder to the end of sys.path to avoid shadowing the third-party library
+shadowing_paths = [str(PROJECT_ROOT), str(SRC_DIR), "", "."]
+for path in shadowing_paths:
+    while path in sys.path:
+        sys.path.remove(path)
+    sys.path.append(path)
+
+# Add AGENT_DIR, SRC_DIR, and PROJECT_ROOT to sys.path so we can import internal modules
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+if str(SRC_DIR) not in sys.path:
+    sys.path.append(str(SRC_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 # Configure stdout/stdin encoding to support UTF-8 (emojis, etc.) on Windows consoles
 if hasattr(sys.stdout, 'reconfigure'):

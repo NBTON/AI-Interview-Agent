@@ -10,8 +10,8 @@ from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
-# Load variables from the project-root .env file
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# Load variables from the project-root .env file, overriding any pre-existing environment variables
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 _supabase_url = os.environ.get("SUPABASE_URL")
 _supabase_key = os.environ.get("SUPABASE_KEY")
@@ -74,30 +74,29 @@ def get_program_requirements() -> dict:
 openai_key = os.environ.get("OPENAI_API_KEY")
 openrouter_key = os.environ.get("OPENROUTER_API_KEY")
 
-primary_llm = None
-fallback_llm = None
+OPENROUTER_MODELS = [
+    "nex-agi/nex-n2-pro:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/owl-alpha",
+    "poolside/laguna-m.1:free",
+    "poolside/laguna-xs.2:free",
+    "nvidia/nemotron-3-super-120b-a12b:free"
+]
 
-if openai_key:
-    primary_llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.7,
-        api_key=openai_key,
-    )
+_llm = None
 
 if openrouter_key:
-    fallback_llm = ChatOpenAI(
-        model="openrouter/free",
-        temperature=0.7,
-        base_url="https://openrouter.ai/api/v1",
-        api_key=openrouter_key,
-    )
-
-if primary_llm and fallback_llm:
-    _llm = primary_llm.with_fallbacks([fallback_llm])
-elif primary_llm:
-    _llm = primary_llm
-elif fallback_llm:
-    _llm = fallback_llm
+    llm_instances = [
+        ChatOpenAI(
+            model=model_name,
+            temperature=0.7,
+            base_url="https://openrouter.ai/api/v1",
+            api_key=openrouter_key,
+            timeout=15,
+        )
+        for model_name in OPENROUTER_MODELS
+    ]
+    _llm = llm_instances[0].with_fallbacks(llm_instances[1:])
 else:
     _llm = ChatOpenAI(
         model="gpt-4o-mini",
@@ -203,12 +202,22 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         f"Return only the question."
     )
 
-    response = _llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt),
-    ])
-
-    return response.content.strip()
+    try:
+        response = _llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
+        return response.content.strip()
+    except Exception as e:
+        print(f"[Fallback Mode] generate_question LLM failed: {e}")
+        fallbacks = {
+            "background": "Tell me about your background in software development and AI.",
+            "education": "What is your educational background, and how did it prepare you for this bootcamp?",
+            "experience": "Can you describe your professional experience working with software or data projects?",
+            "skills": "What programming languages and technical tools are you most proficient in?",
+            "projects": "Tell me about a technical project you built. What was your role and what technologies did you use?"
+        }
+        return fallbacks.get(topic, f"Could you please tell me more about your experience with {topic}?")
 
 
 def generate_probe_question(topic: str, last_question: str, last_answer: str) -> str:
@@ -227,12 +236,15 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
         f"Generate a professional, natural follow-up question digging deeper into their response."
     )
     
-    response = _llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt),
-    ])
-    
-    return response.content.strip()
+    try:
+        response = _llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
+        return response.content.strip()
+    except Exception as e:
+        print(f"[Fallback Mode] generate_probe_question LLM failed: {e}")
+        return f"That's interesting. Can you go into more detail about your response for {topic} and provide some specific examples?"
 
 
 def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
@@ -284,30 +296,19 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
 """
 
     try:
-        eval_primary = None
-        eval_fallback = None
-
-        if openai_key:
-            eval_primary = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0.0,
-                api_key=openai_key,
-            )
-
+        eval_llm = None
         if openrouter_key:
-            eval_fallback = ChatOpenAI(
-                model="openrouter/free",
-                temperature=0.0,
-                base_url="https://openrouter.ai/api/v1",
-                api_key=openrouter_key,
-            )
-
-        if eval_primary and eval_fallback:
-            eval_llm = eval_primary.with_fallbacks([eval_fallback])
-        elif eval_primary:
-            eval_llm = eval_primary
-        elif eval_fallback:
-            eval_llm = eval_fallback
+            eval_instances = [
+                ChatOpenAI(
+                    model=model_name,
+                    temperature=0.0,
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_key,
+                    timeout=15,
+                )
+                for model_name in OPENROUTER_MODELS
+            ]
+            eval_llm = eval_instances[0].with_fallbacks(eval_instances[1:])
         else:
             eval_llm = ChatOpenAI(
                 model="gpt-4o-mini",
@@ -320,15 +321,51 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
         return parsed_result.model_dump()
         
     except Exception as e:
-        print(f"Exception during evaluate_answer: {e}")
-        # Default fallback structure on parsing error
-        return {
-            "score": 3,
-            "feedback": "Valid response demonstrating basic technical understanding. [Fallback Mode]",
-            "needs_probe": False,
-            "extracted_skills": ["Python"],
-            "extracted_info": {}
-        }
+        print(f"[Fallback Mode] evaluate_answer LLM failed: {e}")
+        # Rule-based fallback evaluation for offline / API-key-less execution
+        words = answer.strip().split()
+        word_count = len(words)
+        
+        # Simple keyword extraction
+        keywords = ["python", "sql", "javascript", "react", "streamlit", "machine learning", "ml", "ai", "pandas", "numpy", "scikit-learn", "git", "postgre", "database", "supabase", "html", "css", "django", "fastapi", "pyspark", "spark", "redis", "pytorch", "tensorflow", "keras", "yolo", "aws", "docker", "github", "langgraph", "langchain", "faiss"]
+        extracted = []
+        for kw in keywords:
+            if kw in answer.lower():
+                # Format nicely
+                fmt = kw.capitalize() if kw not in ["sql", "ml", "ai", "html", "css", "git", "aws"] else kw.upper()
+                if kw == "scikit-learn":
+                    fmt = "Scikit-Learn"
+                elif kw == "langgraph":
+                    fmt = "LangGraph"
+                elif kw == "langchain":
+                    fmt = "LangChain"
+                extracted.append(fmt)
+                
+        if word_count < 10:
+            return {
+                "score": 2,
+                "feedback": "Your response is quite brief. Could you elaborate and provide more detail about your experience? [Fallback Mode]",
+                "needs_probe": True,
+                "extracted_skills": extracted if extracted else ["Python"],
+                "extracted_info": {}
+            }
+        elif word_count < 20:
+            return {
+                "score": 3,
+                "feedback": "Good response, but providing more specific examples would be helpful. [Fallback Mode]",
+                "needs_probe": False,
+                "extracted_skills": extracted if extracted else ["Python"],
+                "extracted_info": {}
+            }
+        else:
+            score = 5 if extracted else 4
+            return {
+                "score": score,
+                "feedback": "Excellent detailed response! [Fallback Mode]" if score == 5 else "Good response with reasonable details. [Fallback Mode]",
+                "needs_probe": False,
+                "extracted_skills": extracted if extracted else ["Python"],
+                "extracted_info": {}
+            }
 
 
 def record_turn_and_update_profile(
