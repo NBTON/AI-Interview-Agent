@@ -234,3 +234,34 @@ Here is an extract from `test_agent.py` showing how the agents coordinate to per
 🗂️ [Profile Builder Agent] Saving details & updating memory for 'skills'...
 ✅ [Profile Builder Agent] Topic 'skills' coverage completed.
 ```
+
+---
+
+## Web API & Frontend Interface
+
+### API Endpoints
+| Endpoint | Method | Status |
+| :--- | :--- | :--- |
+| `/health` | GET | ✅ Working |
+| `/api/candidates/verify` | POST | ✅ Working |
+| `/api/candidates` | GET | ✅ Working |
+| `/api/candidates/{name}` | GET | ✅ Working |
+| `/api/recruiter/login` | POST | ✅ Working |
+| `/api/interview/start` | POST | ✅ Working |
+| `/api/interview/answer` | POST | ✅ Working |
+| `/api/interview/session/{id}` | GET | ✅ Working |
+
+### Running the Web Application
+
+To run the complete application, you can start the backend FastAPI server and the Streamlit frontend interface.
+
+#### 1. Start the Backend API
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+#### 2. Start the Frontend Interface
+In a new terminal, run:
+```bash
+streamlit run streamlit_interface/app.py
+```
