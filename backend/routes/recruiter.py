@@ -105,24 +105,9 @@ class CandidateSummary(BaseModel):
 # ============================================
 # ROUTES
 # ============================================
+# NOTE: Recruiter login is handled by auth.py (/api/recruiter/login)
+# to avoid duplicate route registration.
 
-@router.post("/login", response_model=RecruiterLoginResponse)
-def recruiter_login(request: RecruiterLoginRequest):
-    """Authenticate a recruiter"""
-    # Get password from environment
-    recruiter_password = os.getenv("RECRUITER_PASSWORD", "admin")
-    
-    if request.username != "admin" or request.password != recruiter_password:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid username or password"
-        )
-    
-    return RecruiterLoginResponse(
-        success=True,
-        message="Login successful",
-        token="mock-jwt-token-12345"  # Mock token for MVP
-    )
 
 @router.get("/dashboard", response_model=DashboardStats)
 def get_dashboard_stats():

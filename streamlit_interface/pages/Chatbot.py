@@ -3,6 +3,12 @@ import requests
 
 st.set_page_config(page_title="Interview Chat", page_icon="💬", layout="wide")
 
+# Guard: redirect if no candidate verified
+if "candidate_name" not in st.session_state:
+    st.warning("Please verify your identity first.")
+    st.switch_page("pages/Candidate.py")
+    st.stop()
+
 API_URL = "http://localhost:8000/api"
 
 # -----------------------------
@@ -21,7 +27,7 @@ if "session_id" not in st.session_state and "candidate_name" in st.session_state
     try:
         response = requests.post(f"{API_URL}/interview/start", json={
             "candidate_name": st.session_state["candidate_name"],
-            "candidate_email": st.session_state.get("candidate_email", "candidate@example.com")
+            "candidate_email": st.session_state.get("candidate_email", st.session_state.get("candidate_name", "candidate").lower().replace(" ", "") + "@example.com")
         })
         
         if response.status_code == 200:
@@ -125,6 +131,8 @@ with col1:
                 except Exception as e:
                     st.error(f"Error connecting to backend: {str(e)}")
             
+            # Clear input key from session state
+            st.session_state["chat_input"] = ""
             # Clear input by rerunning
             st.rerun()
 
@@ -148,7 +156,7 @@ with col2:
             if response.status_code == 200:
                 session_data = response.json()
                 current_q = session_data.get("question_number", 1)
-                total_q = session_data.get("total_questions", 8)
+                total_q = session_data.get("total_questions", 5)
                 progress = (current_q - 1) / total_q
                 
                 st.write(f"**Question:** {current_q}/{total_q}")
