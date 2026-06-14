@@ -167,7 +167,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
 
 
 def generate_question(topic: str, context: dict, asked_so_far: list, candidate_id: str = None) -> str:
-    """Generate a contextual interview question using an LLM, incorporating candidate profile context if available."""
+    """Generate a contextual structured interview question using an LLM, incorporating candidate profile context if available."""
     skills = context.get("skills_to_assess", [])
     rubric = context.get("rubric", {})
 
@@ -180,13 +180,37 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         except Exception as e:
             print(f"Error fetching profile context for question generation: {e}")
 
+    # Determine question types based on topic
+    if topic in ["background", "education", "experience", "projects"]:
+        allowed_types = ["text", "likert_scale"]
+        type_guideline = "The question type MUST be randomly chosen from 'text' or 'likert_scale'."
+    else: # skills
+        allowed_types = ["coding", "multiple_choice", "true_false", "likert_scale"]
+        type_guideline = "The question type MUST be randomly chosen from 'coding', 'multiple_choice', 'true_false', or 'likert_scale'."
+
     system_prompt = (
         "You are an interviewer conducting a bootcamp admission interview. "
-        "Generate exactly ONE clear, professional question for the candidate. "
-        "Do not include any preamble, explanation, or extra text — only the question itself."
+        "Generate exactly ONE structured question for the candidate in JSON format. "
+        "Do not include any preamble, markdown code blocks, or extra text — only the raw JSON. "
+        "The JSON must have the following keys:\n"
+        f"- 'type': The type of the question. Valid values: " + ", ".join([f"'{t}'" for t in allowed_types]) + ".\n"
+        "- 'text': The question text/description. For 'coding', it is the programming problem description.\n"
+        "- 'options': A list of 4 options (for multiple_choice), ['True', 'False'] (for true_false), or 5 options ranging from Strongly Disagree to Strongly Agree (for likert_scale). For others, it must be null.\n"
+        "- 'initial_code': A template code snippet to be completed or debugged (for coding). For others, it must be null.\n"
+        "- 'solution_test': A brief description of the expected output or test case (for coding). For others, it must be null."
     )
 
     asked_text = "\n".join(f"- {q}" for q in asked_so_far) if asked_so_far else "None yet."
+
+    # Adaptive questioning: determine technical difficulty level from context
+    scores = context.get("scores", {})
+    bg_score = scores.get("background")
+    is_experienced = bg_score is not None and bg_score >= 4
+    
+    if is_experienced:
+        difficulty_guideline = "Since the candidate has high scores/strong background, generate an ADVANCED technical question requiring deep implementation details or complex problem-solving."
+    else:
+        difficulty_guideline = "Since the candidate is a beginner/student, generate a FOUNDATIONAL or ENTRY-LEVEL question assessing core programming concepts and basic database understanding."
 
     user_prompt = (
         f"Topic for this question: {topic}\n\n"
@@ -197,31 +221,99 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         f"  Weak: {rubric.get('weak', 'N/A')}\n\n"
         f"{profile_context}"
         f"Questions already asked:\n{asked_text}\n\n"
-        f"Generate a new, different question about '{topic}' that has NOT been asked yet. "
-        f"If the topic is 'skills', try to probe specific skills from the list. "
-        f"Return only the question."
+        f"Difficulty Level Guideline:\n{difficulty_guideline}\n\n"
+        f"{type_guideline}\n"
+        f"Generate a new, different question about '{topic}' that has NOT been asked yet.\n"
+        f"Return ONLY valid JSON."
     )
+
+    import json
+    import random
+    
+    # Fallback generator for clean offline operations
+    def make_fallback(topic_name):
+        if topic_name == "background":
+            stype = random.choice(["text", "likert_scale"])
+            if stype == "likert_scale":
+                return json.dumps({
+                    "type": "likert_scale",
+                    "text": "I am highly comfortable building software applications independently. Rate this statement.",
+                    "options": ["1 - Strongly Disagree", "2 - Disagree", "3 - Neutral", "4 - Agree", "5 - Strongly Agree"],
+                    "initial_code": None,
+                    "solution_test": None
+                })
+            return json.dumps({"type": "text", "text": "Tell me about your background in software development and AI.", "options": None, "initial_code": None, "solution_test": None})
+        elif topic_name == "education":
+            return json.dumps({"type": "text", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "initial_code": None, "solution_test": None})
+        elif topic_name == "experience":
+            return json.dumps({"type": "text", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "initial_code": None, "solution_test": None})
+        elif topic_name == "projects":
+            return json.dumps({"type": "text", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "initial_code": None, "solution_test": None})
+        else: # skills
+            stype = random.choice(["coding", "multiple_choice", "true_false", "likert_scale"])
+            if stype == "coding":
+                return json.dumps({
+                    "type": "coding",
+                    "text": "Complete the Python function `find_primes(n)` that returns a list of all prime numbers up to n.",
+                    "options": None,
+                    "initial_code": "def find_primes(n):\n    # Write your code here\n    pass",
+                    "solution_test": "find_primes(10) == [2, 3, 5, 7]"
+                })
+            elif stype == "multiple_choice":
+                return json.dumps({
+                    "type": "multiple_choice",
+                    "text": "Which of the following database query techniques retrieves data fastest for large tables?",
+                    "options": ["A) Table scan", "B) Index scan/seek", "C) Nested loop join", "D) Full text search"],
+                    "initial_code": None,
+                    "solution_test": None
+                })
+            elif stype == "true_false":
+                return json.dumps({
+                    "type": "true_false",
+                    "text": "Python's standard library `multiprocessing` allows true parallel thread execution on multi-core systems by bypassing the Global Interpreter Lock (GIL). True or False?",
+                    "options": ["True", "False"],
+                    "initial_code": None,
+                    "solution_test": None
+                })
+            else: # likert_scale
+                return json.dumps({
+                    "type": "likert_scale",
+                    "text": "I feel confident implementing machine learning models from scratch in Python. Rate this statement.",
+                    "options": ["1 - Strongly Disagree", "2 - Disagree", "3 - Neutral", "4 - Agree", "5 - Strongly Agree"],
+                    "initial_code": None,
+                    "solution_test": None
+                })
 
     try:
         response = _llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ])
-        return response.content.strip()
+        content = response.content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```json") or lines[0].startswith("```"):
+                content = "\n".join(lines[1:-1])
+        data = json.loads(content)
+        if "type" in data and "text" in data:
+            return json.dumps(data)
+        raise ValueError("Invalid format")
     except Exception as e:
         print(f"[Fallback Mode] generate_question LLM failed: {e}")
-        fallbacks = {
-            "background": "Tell me about your background in software development and AI.",
-            "education": "What is your educational background, and how did it prepare you for this bootcamp?",
-            "experience": "Can you describe your professional experience working with software or data projects?",
-            "skills": "What programming languages and technical tools are you most proficient in?",
-            "projects": "Tell me about a technical project you built. What was your role and what technologies did you use?"
-        }
-        return fallbacks.get(topic, f"Could you please tell me more about your experience with {topic}?")
+        return make_fallback(topic)
 
 
 def generate_probe_question(topic: str, last_question: str, last_answer: str) -> str:
     """Generates a follow-up probing question to dig deeper into a weak or brief answer."""
+    orig_q_text = last_question
+    try:
+        import json
+        q_data = json.loads(last_question)
+        if isinstance(q_data, dict) and "text" in q_data:
+            orig_q_text = q_data["text"]
+    except:
+        pass
+
     system_prompt = (
         "You are a professional technical interviewer. The candidate gave a brief or weak answer "
         "to a previous question. Generate exactly ONE follow-up probe question to encourage "
@@ -231,7 +323,7 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
     
     user_prompt = (
         f"Topic: {topic}\n"
-        f"Previous Question: {last_question}\n"
+        f"Previous Question: {orig_q_text}\n"
         f"Candidate Answer: {last_answer}\n\n"
         f"Generate a professional, natural follow-up question digging deeper into their response."
     )
@@ -241,16 +333,25 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ])
-        return response.content.strip()
+        q_text = response.content.strip()
     except Exception as e:
         print(f"[Fallback Mode] generate_probe_question LLM failed: {e}")
-        return f"That's interesting. Can you go into more detail about your response for {topic} and provide some specific examples?"
+        q_text = f"That's interesting. Can you go into more detail about your response for {topic} and provide some specific examples?"
+
+    import json
+    return json.dumps({
+        "type": "text",
+        "text": q_text,
+        "options": None,
+        "initial_code": None,
+        "solution_test": None
+    })
 
 
 def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
     """
     Evaluates the candidate's answer against the technical bootcamp rubric,
-    and returns a structured dictionary with score, feedback, probing flag, and extracted data.
+    handling different question types (text, multiple_choice, true_false, coding).
     """
     if not answer or not answer.strip():
         return {
@@ -260,16 +361,142 @@ def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
             "extracted_skills": [],
             "extracted_info": {}
         }
-     
+
+    import json
+    q_text = question
+    q_type = "text"
+    q_options = None
+    q_initial_code = None
+    q_solution_test = None
+    try:
+        q_data = json.loads(question)
+        if isinstance(q_data, dict) and "type" in q_data:
+            q_text = q_data.get("text", "")
+            q_type = q_data.get("type", "text")
+            q_options = q_data.get("options")
+            q_initial_code = q_data.get("initial_code")
+            q_solution_test = q_data.get("solution_test")
+    except:
+        pass
+
     parser = PydanticOutputParser(pydantic_object=EvaluationResult)
 
-    system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
-Your absolute goal is to parse the candidate's response, map it to the strict rubric below, and return a flawless, structured JSON object.
+    if q_type == "multiple_choice" or q_type == "true_false":
+        system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
+Your goal is to parse the candidate's selection, evaluate if it is correct, and return a structured JSON object.
 
 [CONTEXT]
 Question Asked:
 <question>
-{question}
+{q_text}
+</question>
+
+Options provided:
+<options>
+{q_options}
+</options>
+
+Candidate's Answer to Evaluate:
+<candidate_answer>
+{answer}
+</candidate_answer>
+
+Bootcamp Rubric Guidelines:
+- Correct selection (Score 5): The candidate selected the correct option.
+- Incorrect selection (Score 1): The candidate selected an incorrect option.
+
+[STRICT EVALUATION INSTRUCTIONS]
+1. Grading: Assign 5 for correct, 1 for incorrect.
+2. Probing Flag ('needs_probe'): Must be `false` since MCQs/True-False do not need probing.
+3. Skill Extraction: Scan the <question> and <candidate_answer> and extract explicit technical terms, frameworks, libraries, or architectural patterns mentioned.
+4. Information Extraction ('extracted_info'): Extract key facts if any.
+5. Critique Language: Write the 'feedback' completely in professional English, explaining why the selected option is correct or incorrect.
+
+[CRITICAL OUTPUT FORMAT CONTRACT]
+{parser.get_format_instructions()}
+
+Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
+"""
+    elif q_type == "likert_scale":
+        system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
+Your goal is to parse the candidate's Likert scale self-assessment, evaluate the response, and return a structured JSON object.
+
+[CONTEXT]
+Question Asked:
+<question>
+{q_text}
+</question>
+
+Candidate's Selected Rating:
+<candidate_answer>
+{answer}
+</candidate_answer>
+
+Bootcamp Rubric Guidelines:
+- Extract the numeric score (1 to 5) chosen by the candidate from their selection (e.g. "4 - Agree" means score is 4).
+- If the answer has no number, default to 3.
+
+[STRICT EVALUATION INSTRUCTIONS]
+1. Grading: Assign the candidate's self-assessed score (integer from 1 to 5).
+2. Probing Flag ('needs_probe'): Must be `false`.
+3. Skill Extraction: Scan the <question> and extract any explicit technical terms or frameworks.
+4. Critique Language: Write the 'feedback' completely in professional English, acknowledging their self-assessed proficiency level and how it relates to the bootcamp's expectations.
+
+[CRITICAL OUTPUT FORMAT CONTRACT]
+{parser.get_format_instructions()}
+
+Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
+"""
+    elif q_type == "coding":
+        system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
+Your goal is to evaluate the candidate's submitted Python code for a programming exercise.
+
+[CONTEXT]
+Programming Problem:
+<question>
+{q_text}
+</question>
+
+Initial Code Template:
+<initial_code>
+{q_initial_code}
+</initial_code>
+
+Expected Test/Outcome:
+<solution_test>
+{q_solution_test}
+</solution_test>
+
+Candidate's Submitted Code:
+<candidate_answer>
+{answer}
+</candidate_answer>
+
+Bootcamp Rubric Guidelines:
+- Excellent (Score 5): Clean, correct, well-structured code with correct logic and optimal time complexity.
+- Good (Score 3-4): Code has minor logical issues, styling bugs, or sub-optimal complexity but functions.
+- Weak (Score 1-2): Syntax errors, completely incorrect logic, or empty solution.
+
+[STRICT EVALUATION INSTRUCTIONS]
+1. Grading: Assign an integer from 1 to 5. Be fair but strict.
+2. Probing Flag ('needs_probe'): Set this to `false` as coding exercises do not require probing.
+3. Skill Extraction: Extract explicit technical terms, libraries, or patterns used (e.g. 'Python', 'List comprehension', 'Primes').
+4. Information Extraction ('extracted_info'): Extract any key facts.
+5. Critique Language: Write the 'feedback' in professional English, highlighting syntax correctness, clean structure, complexity, and how it can be improved.
+
+[CRITICAL OUTPUT FORMAT CONTRACT]
+{parser.get_format_instructions()}
+
+Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
+"""
+    else: # text
+        system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
+Your absolute goal is to parse the candidate's response, map it to the strict rubric below, and return a structured JSON object.
+
+[CONTEXT]
+Question Asked:
+<question>
+{q_text}
 </question>
 
 Candidate's Answer to Evaluate:
@@ -285,14 +512,14 @@ Bootcamp Rubric Guidelines:
 [STRICT EVALUATION INSTRUCTIONS]
 1. Grading: Assign an integer from 1 to 5. Be fair but strict. Do not give a 5 unless the candidate provided real technical depth or examples.
 2. Probing Flag ('needs_probe'): Set this to `true` ONLY if the answer is technically on the right track but too short, shallow, or generic, meaning a follow-up question is required to judge their actual skill. Otherwise, set it to `false`.
-3. Skill Extraction: Scan the <candidate_answer> and extract explicit technical terms, frameworks, libraries, or architectural patterns mentioned (e.g., 'Python', 'Pandas', 'Random Forest'). Never invent or assume skills not explicitly stated by the candidate.
-4. Information Extraction ('extracted_info'): Extract key facts from the candidate's response as a structured key-value object. For background, extract motivation or goals. For education, extract university or degree. For experience, extract company, role, or duration. For projects, extract project name or technology stack.
-5. Critique Language: Write the 'feedback' completely in professional English. Focus on what was good and what was missing technically.
+3. Skill Extraction: Scan the <candidate_answer> and extract explicit technical terms, frameworks, libraries, or architectural patterns mentioned.
+4. Information Extraction ('extracted_info'): Extract key facts from the candidate's response.
+5. Critique Language: Write the 'feedback' completely in professional English.
 
 [CRITICAL OUTPUT FORMAT CONTRACT]
 {parser.get_format_instructions()}
 
-Strictly JSON only. Do NOT include any introductory pleasantries, markdown code block wrappers (like ```json), or trailing commentary. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
+Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
 """
 
     try:
@@ -317,21 +544,23 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
             )
         
         response = eval_llm.invoke([HumanMessage(content=system_prompt)])
-        parsed_result = parser.parse(response.content)
+        content = response.content.strip()
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```json") or lines[0].startswith("```"):
+                content = "\n".join(lines[1:-1])
+        parsed_result = parser.parse(content)
         return parsed_result.model_dump()
         
     except Exception as e:
         print(f"[Fallback Mode] evaluate_answer LLM failed: {e}")
-        # Rule-based fallback evaluation for offline / API-key-less execution
         words = answer.strip().split()
         word_count = len(words)
         
-        # Simple keyword extraction
         keywords = ["python", "sql", "javascript", "react", "streamlit", "machine learning", "ml", "ai", "pandas", "numpy", "scikit-learn", "git", "postgre", "database", "supabase", "html", "css", "django", "fastapi", "pyspark", "spark", "redis", "pytorch", "tensorflow", "keras", "yolo", "aws", "docker", "github", "langgraph", "langchain", "faiss"]
         extracted = []
         for kw in keywords:
             if kw in answer.lower():
-                # Format nicely
                 fmt = kw.capitalize() if kw not in ["sql", "ml", "ai", "html", "css", "git", "aws"] else kw.upper()
                 if kw == "scikit-learn":
                     fmt = "Scikit-Learn"
@@ -341,31 +570,86 @@ Strictly JSON only. Do NOT include any introductory pleasantries, markdown code 
                     fmt = "LangChain"
                 extracted.append(fmt)
                 
-        if word_count < 10:
+        if q_type == "multiple_choice" or q_type == "true_false":
+            is_correct = False
+            if q_type == "true_false":
+                if "true" in answer.lower() and "false" not in answer.lower():
+                    is_correct = True
+            else:
+                if "b" in answer.lower() or "index" in answer.lower():
+                    is_correct = True
+            
             return {
-                "score": 2,
-                "feedback": "Your response is quite brief. Could you elaborate and provide more detail about your experience? [Fallback Mode]",
-                "needs_probe": True,
-                "extracted_skills": extracted if extracted else ["Python"],
-                "extracted_info": {}
-            }
-        elif word_count < 20:
-            return {
-                "score": 3,
-                "feedback": "Good response, but providing more specific examples would be helpful. [Fallback Mode]",
+                "score": 5 if is_correct else 1,
+                "feedback": f"Your selected answer is correct. [Fallback Mode]" if is_correct else f"Your selected answer is incorrect. [Fallback Mode]",
                 "needs_probe": False,
-                "extracted_skills": extracted if extracted else ["Python"],
+                "extracted_skills": extracted,
                 "extracted_info": {}
             }
+        elif q_type == "likert_scale":
+            import re
+            match_digit = re.search(r'\d', answer)
+            score_val = int(match_digit.group()) if match_digit else 3
+            if not (1 <= score_val <= 5):
+                score_val = 3
+            return {
+                "score": score_val,
+                "feedback": f"Thank you for rating your proficiency. Your self-assessed level is {score_val}/5. [Fallback Mode]",
+                "needs_probe": False,
+                "extracted_skills": extracted,
+                "extracted_info": {}
+            }
+        elif q_type == "coding":
+            has_syntax_error = False
+            syntax_error_msg = ""
+            try:
+                compile(answer, "<string>", "exec")
+            except Exception as se:
+                has_syntax_error = True
+                syntax_error_msg = str(se)
+            
+            if has_syntax_error:
+                return {
+                    "score": 2,
+                    "feedback": f"Your code has syntax errors: {syntax_error_msg}. Please fix the syntax. [Fallback Mode]",
+                    "needs_probe": False,
+                    "extracted_skills": extracted,
+                    "extracted_info": {}
+                }
+            else:
+                return {
+                    "score": 5 if len(answer) > 20 else 3,
+                    "feedback": "Your Python code compiles successfully and looks correct! [Fallback Mode]",
+                    "needs_probe": False,
+                    "extracted_skills": extracted,
+                    "extracted_info": {}
+                }
         else:
-            score = 5 if extracted else 4
-            return {
-                "score": score,
-                "feedback": "Excellent detailed response! [Fallback Mode]" if score == 5 else "Good response with reasonable details. [Fallback Mode]",
-                "needs_probe": False,
-                "extracted_skills": extracted if extracted else ["Python"],
-                "extracted_info": {}
-            }
+            if word_count < 10:
+                return {
+                    "score": 2,
+                    "feedback": "Your response is quite brief. Could you elaborate and provide more detail about your experience? [Fallback Mode]",
+                    "needs_probe": True,
+                    "extracted_skills": extracted if extracted else ["Python"],
+                    "extracted_info": {}
+                }
+            elif word_count < 20:
+                return {
+                    "score": 3,
+                    "feedback": "Good response, but providing more specific examples would be helpful. [Fallback Mode]",
+                    "needs_probe": False,
+                    "extracted_skills": extracted if extracted else ["Python"],
+                    "extracted_info": {}
+                }
+            else:
+                score = 5 if extracted else 4
+                return {
+                    "score": score,
+                    "feedback": "Excellent detailed response! [Fallback Mode]" if score == 5 else "Good response with reasonable details. [Fallback Mode]",
+                    "needs_probe": False,
+                    "extracted_skills": extracted if extracted else ["Python"],
+                    "extracted_info": {}
+                }
 
 
 def record_turn_and_update_profile(

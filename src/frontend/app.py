@@ -11,11 +11,13 @@ st.set_page_config(
 #  CSS 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
 
-body {
-    background: linear-gradient(135deg, #EEF2FF, #E0E7FF, #C7D2FE);
-    background-size: 300% 300%;
-    animation: gradientMove 10s ease infinite;
+html, body, [data-testid="stAppViewContainer"], .stApp {
+    font-family: 'Outfit', sans-serif !important;
+    background: linear-gradient(135deg, #EEF2FF, #E0E7FF, #C7D2FE) !important;
+    background-size: 300% 300% !important;
+    animation: gradientMove 15s ease infinite !important;
 }
 
 /* background */
@@ -32,82 +34,82 @@ body {
 .main-title {
     text-align: center;
     font-weight: 900;
-    font-size: 3.6rem;
-    background: linear-gradient(90deg, #4F46E5, #6366F1, #A78BFA);
+    font-size: 4rem;
+    background: linear-gradient(90deg, #4F46E5, #6366F1, #8B5CF6);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    text-shadow: 0 0 18px rgba(99,102,241,0.25);
+    text-shadow: 0 0 30px rgba(99,102,241,0.15);
+    margin-top: 40px;
+    margin-bottom: 5px;
     animation: fadeIn 1.2s ease-in-out;
 }
 
 .subtitle {
     text-align: center;
-    font-size: 1.35rem;
+    font-size: 1.4rem;
     color: #4B5563;
-    margin-bottom: 55px;
+    margin-bottom: 60px;
     animation: fadeIn 1.6s ease-in-out;
 }
 
-
 .custom-card {
     background: rgba(255, 255, 255, 0.75);
-    backdrop-filter: blur(14px);
-    padding: 40px;
-    border-radius: 26px;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    padding: 45px 35px;
+    border-radius: 28px;
+    box-shadow: 0 15px 35px rgba(0,0,0,0.06);
     text-align: center;
-    transition: all 0.35s ease;
-    border: 1px solid rgba(99,102,241,0.35);
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    border: 1px solid rgba(99,102,241,0.2);
 }
 
 .custom-card:hover {
-    transform: translateY(-12px) scale(1.03);
-    box-shadow: 0 25px 55px rgba(79,70,229,0.35);
-    border-color: #4F46E5;
-    
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 30px 60px rgba(79,70,229,0.18);
+    border-color: rgba(99,102,241,0.55);
 }
 
 .card-icon {
     margin-bottom: 25px;
-    filter: drop-shadow(0 6px 12px rgba(0,0,0,0.15));
+    filter: drop-shadow(0 8px 16px rgba(99,102,241,0.15));
 }
 
 .card-title {
-    font-size: 1.75rem;
+    font-size: 1.95rem;
     font-weight: 800;
-    color: #312E81;
+    color: #1E1B4B;
     margin-bottom: 12px;
 }
-
 
 .card-desc {
     font-size: 1.1rem;
     color: #4B5563;
     margin-bottom: 25px;
-    min-height: 50px;
+    min-height: 55px;
+    line-height: 1.5;
 }
 
-
 div.stButton > button {
-    background: linear-gradient(135deg, #4F46E5 0%, #4338CA 100%) !important;
+    background: linear-gradient(135deg, #4F46E5 0%, #6366F1 100%) !important;
     color: white !important;
-    font-weight: 800 !important;
-    padding: 15px 28px !important;
-    border-radius: 16px !important;
+    font-weight: 700 !important;
+    padding: 14px 28px !important;
+    border-radius: 14px !important;
     border: none !important;
-    transition: 0.3s ease !important;
-    box-shadow: 0 6px 18px rgba(79,70,229,0.35);
-    letter-spacing: 0.5px;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 6px 20px rgba(79,70,229,0.25) !important;
+    font-size: 16px !important;
 }
 
 div.stButton > button:hover {
-    background: linear-gradient(135deg, #4338CA 0%, #3730A3 100%) !important;
-    transform: translateY(-4px);
-    box-shadow: 0 10px 28px rgba(55,48,163,0.55);
+    background: linear-gradient(135deg, #4338CA 0%, #4F46E5 100%) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 10px 25px rgba(79,70,229,0.4) !important;
 }
 
 div.stButton {
-    margin-top: 50px;
+    margin-top: 20px;
 }
 
 /* Animation */

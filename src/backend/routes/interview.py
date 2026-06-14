@@ -47,6 +47,9 @@ class StartInterviewResponse(BaseModel):
     session_id: str
     candidate_name: str
     first_question: str
+    question_type: str = "text"
+    options: Optional[List[str]] = None
+    initial_code: Optional[str] = None
     question_number: int
     total_questions: int
 
@@ -57,6 +60,9 @@ class SubmitAnswerRequest(BaseModel):
 class SubmitAnswerResponse(BaseModel):
     session_id: str
     next_question: Optional[str] = None
+    question_type: str = "text"
+    options: Optional[List[str]] = None
+    initial_code: Optional[str] = None
     question_number: int
     total_questions: int
     is_complete: bool
@@ -103,8 +109,24 @@ def start_interview(request: StartInterviewRequest):
             except concurrent.futures.TimeoutError:
                 raise HTTPException(status_code=504, detail="Interview initialization timed out. Please try again.")
         
-        first_question = result.get("last_question", "Hello! Let's start the interview.")
+        first_question_raw = result.get("last_question", "Hello! Let's start the interview.")
         
+        # Parse structured question if JSON
+        q_text = first_question_raw
+        q_type = "text"
+        options = None
+        initial_code = None
+        try:
+            import json
+            q_data = json.loads(first_question_raw)
+            if isinstance(q_data, dict) and "type" in q_data:
+                q_text = q_data.get("text", "")
+                q_type = q_data.get("type", "text")
+                options = q_data.get("options")
+                initial_code = q_data.get("initial_code")
+        except:
+            pass
+
         # Store in-memory metadata for compatibility
         interview_sessions[session_id] = {
             "candidate_name": request.candidate_name,
@@ -117,7 +139,10 @@ def start_interview(request: StartInterviewRequest):
         return StartInterviewResponse(
             session_id=session_id,
             candidate_name=request.candidate_name,
-            first_question=first_question,
+            first_question=q_text,
+            question_type=q_type,
+            options=options,
+            initial_code=initial_code,
             question_number=1,
             total_questions=5  # 5 required topics
         )
@@ -178,9 +203,25 @@ def submit_answer(request: SubmitAnswerRequest):
         })
         
         # Next question
-        next_question = result.get("last_question") if not is_complete else None
+        next_question_raw = result.get("last_question") if not is_complete else None
         q_number = result.get("turn_count", 0) + 1
         
+        q_text = next_question_raw
+        q_type = "text"
+        options = None
+        initial_code = None
+        if next_question_raw:
+            try:
+                import json
+                q_data = json.loads(next_question_raw)
+                if isinstance(q_data, dict) and "type" in q_data:
+                    q_text = q_data.get("text", "")
+                    q_type = q_data.get("type", "text")
+                    options = q_data.get("options")
+                    initial_code = q_data.get("initial_code")
+            except:
+                pass
+
         final_score = None
         if is_complete:
             report = result.get("final_report", {})
@@ -201,7 +242,10 @@ def submit_answer(request: SubmitAnswerRequest):
                 
         return SubmitAnswerResponse(
             session_id=session_id,
-            next_question=next_question,
+            next_question=q_text,
+            question_type=q_type,
+            options=options,
+            initial_code=initial_code,
             question_number=q_number,
             total_questions=5,
             is_complete=is_complete,

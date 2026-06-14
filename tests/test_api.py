@@ -4,6 +4,13 @@ Run with: python test_api.py
 """
 import requests
 import json
+import sys
+
+# Configure stdout/stderr encoding to support UTF-8 (emojis, etc.) on Windows consoles/logs
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 BASE_URL = "http://localhost:8000"
 API_URL = f"{BASE_URL}/api"
