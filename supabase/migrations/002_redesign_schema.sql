@@ -53,7 +53,7 @@ CREATE TABLE programs (
     required_topics  jsonb       NOT NULL DEFAULT '["background","education","experience","skills","projects"]'::jsonb,
     skills_to_assess jsonb       NOT NULL DEFAULT '["Python","ML basics","problem solving","communication"]'::jsonb,
     rubric           jsonb       NOT NULL DEFAULT '{}'::jsonb,
-    max_turns        int         NOT NULL DEFAULT 15,
+    max_turns        int         NOT NULL DEFAULT 30,
     is_active        boolean     NOT NULL DEFAULT true,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now()
@@ -367,7 +367,7 @@ VALUES (
         "good": "Mostly relevant and conceptually correct, but with minor gaps or lacks deep implementation details.",
         "weak": "Vague, brief, off-topic, or shows fundamental misunderstandings. Needs probing."
     }'::jsonb,
-    15
+    30
 );
 
 

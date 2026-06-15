@@ -109,18 +109,25 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
     background: transparent !important;
 }
 
-/* Questionnaire premium card container */
-.questionnaire-card {
+/* Hide Streamlit's top chrome and reduce the empty top gutter on interview pages. */
+#MainMenu, footer, header {
+    visibility: hidden;
+}
+
+.block-container {
+    padding-top: 1.25rem !important;
+}
+
+/* Questionnaire prompt panel */
+.question-panel {
     background: rgba(255, 255, 255, 0.82);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
-    border-radius: 28px;
-    padding: 35px 40px;
+    border-radius: 18px;
+    padding: 26px 30px;
     border: 1px solid rgba(99, 102, 241, 0.22);
     box-shadow: 0 20px 45px rgba(0, 0, 0, 0.05);
-    margin-top: 10px;
-    margin-bottom: 25px;
-    transition: all 0.3s ease;
+    margin: 8px 0 22px;
 }
 
 .question-header {
@@ -132,7 +139,7 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
     border-bottom: 1.5px solid rgba(99, 102, 241, 0.15);
 }
 
-.question-num {
+.question-type {
     font-size: 15px;
     font-weight: 700;
     color: #4B5563;
@@ -157,6 +164,14 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
     line-height: 1.5;
     margin-top: 10px;
     margin-bottom: 25px;
+}
+
+div[data-testid="stTextArea"] textarea {
+    border-radius: 12px !important;
+    border: 1.5px solid rgba(99, 102, 241, 0.22) !important;
+    background: rgba(255, 255, 255, 0.92) !important;
+    color: #111827 !important;
+    font-size: 15px !important;
 }
 
 /* Custom premium styling for MCQ and True/False radio cards */
@@ -196,15 +211,52 @@ div[data-testid="stRadio"] div[role="radiogroup"] {
 }
 
 /* Monospace IDE Editor styling */
-textarea[aria-label="Write/Fix Python Code:"] {
+.ide-shell {
+    background: #0B0F16;
+    border: 1px solid #1F2937;
+    border-bottom: none;
+    border-radius: 14px 14px 0 0;
+    margin-top: 4px;
+}
+
+.ide-titlebar {
+    height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 14px;
+    color: #CBD5E1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+}
+
+.ide-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 999px;
+    display: inline-block;
+}
+
+.ide-dot.red { background: #EF4444; }
+.ide-dot.yellow { background: #F59E0B; }
+.ide-dot.green { background: #22C55E; }
+
+.ide-filename {
+    margin-left: 8px;
+    color: #94A3B8;
+}
+
+div[data-testid="stTextArea"] textarea[aria-label="Code editor"] {
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 14.5px !important;
+    font-size: 15px !important;
     line-height: 1.6 !important;
-    background-color: #1E1E2E !important;
-    color: #CDD6F4 !important;
-    border-radius: 12px !important;
-    padding: 16px !important;
-    border: 1px solid #313244 !important;
+    background-color: #0B0F16 !important;
+    color: #E5E7EB !important;
+    border-radius: 0 0 14px 14px !important;
+    padding: 18px !important;
+    border: 1px solid #1F2937 !important;
+    box-shadow: inset 54px 0 0 #111827 !important;
+    tab-size: 4;
 }
 
 .console-pane {
@@ -241,8 +293,7 @@ textarea[aria-label="Write/Fix Python Code:"] {
     color: #F38BA8;
 }
 
-/* Candidate Information Sidebar panel */
-.side-card {
+.side-card-header {
     background: rgba(255, 255, 255, 0.75);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
@@ -251,9 +302,10 @@ textarea[aria-label="Write/Fix Python Code:"] {
     border: 1px solid rgba(99, 102, 241, 0.2);
     text-align: center;
     box-shadow: 0 15px 30px rgba(0, 0, 0, 0.04);
+    margin-bottom: 16px;
 }
 
-.side-card h4 {
+.side-card-header h4 {
     color: #1E1B4B;
     font-weight: 850;
     font-size: 19px;

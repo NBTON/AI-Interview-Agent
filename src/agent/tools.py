@@ -8,16 +8,23 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-from supabase import create_client, Client
+try:
+    from supabase import create_client, Client
+except Exception as exc:
+    create_client = None
+    Client = object
+    print(f"Supabase client import unavailable; using local fallback mode: {exc}")
 
-# Load variables from the project-root .env file, overriding any pre-existing environment variables
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Load variables from the project-root .env file, overriding any pre-existing environment variables.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 _supabase_url = os.environ.get("SUPABASE_URL")
 _supabase_key = os.environ.get("SUPABASE_KEY")
 _db_client: Client = None
 
-if _supabase_url and _supabase_key and _supabase_key != "your_supabase_service_role_key_here":
+if create_client and _supabase_url and _supabase_key and _supabase_key != "your_supabase_service_role_key_here":
     try:
         _db_client = create_client(_supabase_url, _supabase_key)
     except Exception as e:
@@ -51,7 +58,8 @@ def get_program_requirements() -> dict:
                     "required_topics": prog["required_topics"],
                     "skills_to_assess": prog["skills_to_assess"],
                     "rubric": prog["rubric"],
-                    "max_turns": prog["max_turns"]
+                    "max_turns": min(max(int(prog.get("max_turns") or 30), 10), 30),
+                    "min_turns": 10
                 }
         except Exception as e:
             print(f"Error fetching program requirements from database: {e}")
@@ -67,12 +75,14 @@ def get_program_requirements() -> dict:
             "good": "Mostly relevant and conceptually correct, but with minor gaps or lacks deep implementation details.",
             "weak": "Vague, brief, off-topic, or shows fundamental misunderstandings. Needs probing."
         },
-        "max_turns": 15
+        "min_turns": 10,
+        "max_turns": 30
     }
 
 
 openai_key = os.environ.get("OPENAI_API_KEY")
 openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 OPENROUTER_MODELS = [
     "nex-agi/nex-n2-pro:free",
@@ -83,30 +93,61 @@ OPENROUTER_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free"
 ]
 
-_llm = None
+def _configured_key(value: str | None) -> bool:
+    return bool(value and value.strip() and not value.startswith("your_"))
 
-if openrouter_key:
-    llm_instances = [
+
+def _make_openai_llm(temperature: float = 0.7):
+    if not _configured_key(openai_key):
+        return None
+
+    return ChatOpenAI(
+        model=openai_model,
+        temperature=temperature,
+        api_key=openai_key,
+        timeout=30,
+    )
+
+
+def _make_openrouter_llm(temperature: float = 0.7):
+    if not _configured_key(openrouter_key):
+        return None
+
+    instances = [
         ChatOpenAI(
             model=model_name,
-            temperature=0.7,
+            temperature=temperature,
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_key,
-            timeout=15,
+            timeout=20,
         )
         for model_name in OPENROUTER_MODELS
     ]
-    _llm = llm_instances[0].with_fallbacks(llm_instances[1:])
-else:
-    _llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.7,
-        api_key="",
-    )
+    return instances[0].with_fallbacks(instances[1:])
+
+
+def _make_llm(temperature: float = 0.7):
+    """Use OpenAI as the primary provider and OpenRouter only as fallback."""
+    primary = _make_openai_llm(temperature)
+    fallback = _make_openrouter_llm(temperature)
+
+    if primary and fallback:
+        return primary.with_fallbacks([fallback])
+    if primary:
+        return primary
+    if fallback:
+        return fallback
+
+    return None
+
+
+_llm = _make_llm(temperature=0.7)
 
 
 def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program_id: str = None) -> dict:
     """Ensures candidate, session, and profile exist in Supabase and returns verified UUIDs."""
+    raw_candidate_id = candidate_id
+
     # Convert string ID to valid UUID format using uuid5 for consistency
     try:
         candidate_uuid = str(uuid.UUID(candidate_id))
@@ -128,7 +169,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
             _db_client.table("candidates").upsert({
                 "id": candidate_uuid,
                 "full_name": candidate_name,
-                "email": f"{candidate_name.lower().replace(' ', '')}@example.com",
+                "email": raw_candidate_id if "@" in raw_candidate_id else f"{candidate_name.lower().replace(' ', '')}@example.com",
                 "status": "interviewing"
             }).execute()
             
@@ -182,11 +223,11 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
 
     # Determine question types based on topic
     if topic in ["background", "education", "experience", "projects"]:
-        allowed_types = ["text", "likert_scale"]
-        type_guideline = "The question type MUST be randomly chosen from 'text' or 'likert_scale'."
+        allowed_types = ["open_ended", "multiple_choice", "true_false"]
+        type_guideline = "The question type MUST be randomly chosen from 'open_ended', 'multiple_choice', or 'true_false'."
     else: # skills
-        allowed_types = ["coding", "multiple_choice", "true_false", "likert_scale"]
-        type_guideline = "The question type MUST be randomly chosen from 'coding', 'multiple_choice', 'true_false', or 'likert_scale'."
+        allowed_types = ["open_ended", "coding", "multiple_choice", "true_false"]
+        type_guideline = "The question type MUST be randomly chosen from 'open_ended', 'coding', 'multiple_choice', or 'true_false'."
 
     system_prompt = (
         "You are an interviewer conducting a bootcamp admission interview. "
@@ -195,8 +236,8 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         "The JSON must have the following keys:\n"
         f"- 'type': The type of the question. Valid values: " + ", ".join([f"'{t}'" for t in allowed_types]) + ".\n"
         "- 'text': The question text/description. For 'coding', it is the programming problem description.\n"
-        "- 'options': A list of 4 options (for multiple_choice), ['True', 'False'] (for true_false), or 5 options ranging from Strongly Disagree to Strongly Agree (for likert_scale). For others, it must be null.\n"
-        "- 'initial_code': A template code snippet to be completed or debugged (for coding). For others, it must be null.\n"
+        "- 'options': A list of 4 options (for multiple_choice), ['True', 'False'] (for true_false). For others, it must be null.\n"
+        "- 'initial_code': A Python template code snippet to be completed, debugged, or extended (for coding). For others, it must be null.\n"
         "- 'solution_test': A brief description of the expected output or test case (for coding). For others, it must be null."
     )
 
@@ -223,6 +264,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         f"Questions already asked:\n{asked_text}\n\n"
         f"Difficulty Level Guideline:\n{difficulty_guideline}\n\n"
         f"{type_guideline}\n"
+        "Coding questions should vary across tasks such as fixing a bug, completing a function, explaining output, or improving a naive implementation.\n"
         f"Generate a new, different question about '{topic}' that has NOT been asked yet.\n"
         f"Return ONLY valid JSON."
     )
@@ -233,24 +275,26 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
     # Fallback generator for clean offline operations
     def make_fallback(topic_name):
         if topic_name == "background":
-            stype = random.choice(["text", "likert_scale"])
-            if stype == "likert_scale":
+            stype = random.choice(["open_ended", "multiple_choice", "true_false"])
+            if stype == "multiple_choice":
                 return json.dumps({
-                    "type": "likert_scale",
-                    "text": "I am highly comfortable building software applications independently. Rate this statement.",
-                    "options": ["1 - Strongly Disagree", "2 - Disagree", "3 - Neutral", "4 - Agree", "5 - Strongly Agree"],
+                    "type": "multiple_choice",
+                    "text": "Which background best matches your current preparation for an AI software bootcamp?",
+                    "options": ["A) No programming exposure", "B) Basic Python or scripting experience", "C) Built several software or data projects", "D) Professional software or AI engineering experience"],
                     "initial_code": None,
                     "solution_test": None
                 })
-            return json.dumps({"type": "text", "text": "Tell me about your background in software development and AI.", "options": None, "initial_code": None, "solution_test": None})
+            if stype == "true_false":
+                return json.dumps({"type": "true_false", "text": "True or False: Prior hands-on project work is useful preparation for an intensive AI bootcamp.", "options": ["True", "False"], "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Tell me about your background in software development and AI.", "options": None, "initial_code": None, "solution_test": None})
         elif topic_name == "education":
-            return json.dumps({"type": "text", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "initial_code": None, "solution_test": None})
         elif topic_name == "experience":
-            return json.dumps({"type": "text", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "initial_code": None, "solution_test": None})
         elif topic_name == "projects":
-            return json.dumps({"type": "text", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "initial_code": None, "solution_test": None})
         else: # skills
-            stype = random.choice(["coding", "multiple_choice", "true_false", "likert_scale"])
+            stype = random.choice(["open_ended", "coding", "multiple_choice", "true_false"])
             if stype == "coding":
                 return json.dumps({
                     "type": "coding",
@@ -275,16 +319,19 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "initial_code": None,
                     "solution_test": None
                 })
-            else: # likert_scale
+            else:
                 return json.dumps({
-                    "type": "likert_scale",
-                    "text": "I feel confident implementing machine learning models from scratch in Python. Rate this statement.",
-                    "options": ["1 - Strongly Disagree", "2 - Disagree", "3 - Neutral", "4 - Agree", "5 - Strongly Agree"],
+                    "type": "open_ended",
+                    "text": "Explain how you would use Python to load a dataset, clean missing values, and train a simple machine learning model.",
+                    "options": None,
                     "initial_code": None,
                     "solution_test": None
                 })
 
     try:
+        if _llm is None:
+            raise RuntimeError("No LLM provider is configured.")
+
         response = _llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
@@ -329,6 +376,9 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
     )
     
     try:
+        if _llm is None:
+            raise RuntimeError("No LLM provider is configured.")
+
         response = _llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
@@ -340,7 +390,7 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
 
     import json
     return json.dumps({
-        "type": "text",
+        "type": "open_ended",
         "text": q_text,
         "options": None,
         "initial_code": None,
@@ -523,25 +573,9 @@ Strictly JSON only. Do NOT include any markdown code blocks. Start directly with
 """
 
     try:
-        eval_llm = None
-        if openrouter_key:
-            eval_instances = [
-                ChatOpenAI(
-                    model=model_name,
-                    temperature=0.0,
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=openrouter_key,
-                    timeout=15,
-                )
-                for model_name in OPENROUTER_MODELS
-            ]
-            eval_llm = eval_instances[0].with_fallbacks(eval_instances[1:])
-        else:
-            eval_llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0.0,
-                api_key="",
-            )
+        eval_llm = _make_llm(temperature=0.0)
+        if eval_llm is None:
+            raise RuntimeError("No LLM provider is configured.")
         
         response = eval_llm.invoke([HumanMessage(content=system_prompt)])
         content = response.content.strip()
@@ -817,6 +851,9 @@ Return JSON only. Start directly with '{{' and end with '}}'.
     }
     
     try:
+        if _llm is None:
+            raise RuntimeError("No LLM provider is configured.")
+
         response = _llm.invoke([HumanMessage(content=prompt)])
         import json
         clean_content = response.content.strip()

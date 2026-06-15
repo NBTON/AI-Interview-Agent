@@ -145,7 +145,8 @@ erDiagram
 4. **Resuming with Answer**: The candidate supplies an answer, setting `last_answer`. The graph resumes.
 5. **Evaluation & Memory Consolidation**: The Evaluation Agent scores the response. The Profile Builder Agent records the turn, appends extracted facts to `candidate_profiles`, and updates topic coverage.
 6. **Adaptive Probing**: If the Evaluation Agent set `needs_probe = true` (and we have probed less than 2 times on this topic), the topic is *not* marked as covered. The Interviewer Agent will generate a follow-up question related specifically to their previous response.
-7. **Wrap Up**: When all topics are complete, or the turn limit is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
+7. **Adaptive Continuation**: After required topics are covered, the interviewer can continue asking adaptive follow-up or assessment questions until the minimum interview length is satisfied.
+8. **Wrap Up**: Once at least 10 questions have been answered and coverage is sufficient, or the 30-question hard cap is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
 
 ---
 
@@ -177,7 +178,10 @@ The recent merge successfully unified the Frontend (Streamlit), Backend (FastAPI
 - **Offline and LLM Fallback Robustness**: Integrated OpenRouter models (`nex-agi/nex-n2-pro:free`, etc.) as secondary fallbacks when OpenAI credentials are not provided or rate limits occur. Created local rule-based evaluations for offline candidate scoring and probing, ensuring the system never hangs or crashes without APIs.
 - **Session Identity Propagation**: Fixed candidate verification workflows to store emails in frontend session states, cleanly routing verification states to the interview Chatbot. Added redirect guards to block unverified candidate entries.
 - **DB Syncing & Export**: Integrated candidate dashboard status updates directly with the Supabase database. Added an **Export to Excel** downloader in the Recruiter Dashboard for exporting candidate records on the fly.
-- **Performance Adjustments**: Scaled total interview questions to a consistent 5 required topics and added `120s` thread execution timeouts to prevent hanging calls.
+- **Adaptive Assessment Length**: Interviews now use an adaptive question count with a minimum of 10 answered questions and a hard cap of 30. The candidate UI intentionally does not expose the total question count.
+- **Expanded Question Types**: The interviewer can generate open-ended questions, MCQs, true/false questions, and coding exercises. Coding questions support bug-fix, completion, and implementation-style prompts.
+- **Candidate UI Refresh**: Removed unused top placeholder bars, simplified the progress sidebar, and added an IDE-style coding interface with an execution console.
+- **Performance Adjustments**: Added `120s` thread execution timeouts to prevent hanging calls.
 
 ---
 

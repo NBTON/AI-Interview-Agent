@@ -53,10 +53,14 @@ def node_router(state: InterviewState) -> str:
         return "evaluate"
         
     reqs = get_program_requirements()
-    max_turns = reqs.get("max_turns", 15)
+    min_turns = reqs.get("min_turns", 10)
+    max_turns = reqs.get("max_turns", 30)
+    turn_count = state.get("turn_count", 0)
     
-    # Wrap up if all topics are covered or turn count limit reached
-    if not state.get("missing_info") or state.get("turn_count", 0) >= max_turns:
+    # Wrap up only after the adaptive minimum is satisfied, or at the hard cap.
+    if turn_count >= max_turns:
+        return "wrap_up"
+    if not state.get("missing_info") and turn_count >= min_turns:
         return "wrap_up"
         
     return "generate_question"
@@ -159,6 +163,7 @@ def node_profile_builder(state: InterviewState) -> dict:
         "questions_asked": new_questions,
         "answers": new_answers,
         "turn_count": new_turn_count,
+        "current_topic": current_topic if new_probe_count > 0 else (new_missing[0] if new_missing else current_topic),
         "last_answer": "",  # Clear to avoid re-evaluation on loop
     }
 
@@ -175,7 +180,12 @@ def node_interviewer(state: InterviewState) -> dict:
         question = generate_probe_question(topic, prev_question, prev_answer)
     else:
         # Generate a new question on the next missing topic
-        topic = state["missing_info"][0] if state["missing_info"] else state["current_topic"]
+        if state["missing_info"]:
+            topic = state["missing_info"][0]
+        else:
+            required_topics = reqs.get("required_topics", ["skills", "projects"])
+            turn_count = state.get("turn_count", 0)
+            topic = required_topics[turn_count % len(required_topics)]
         print(f"🎤 [Interviewer Agent] Generating fresh question for topic '{topic}'...")
         
         # Build context dict with scores and requirements

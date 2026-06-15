@@ -28,6 +28,7 @@ from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
 import concurrent.futures
+import json
 
 from agent.graph import build_graph
 
@@ -38,6 +39,52 @@ graph = build_graph()
 
 # Store session metadata (in-memory)
 interview_sessions: Dict[str, dict] = {}
+
+DEFAULT_MIN_QUESTIONS = 10
+DEFAULT_MAX_QUESTIONS = 30
+
+
+def _question_limit() -> int:
+    try:
+        from agent.tools import get_program_requirements
+        reqs = get_program_requirements()
+        return min(max(int(reqs.get("max_turns") or DEFAULT_MAX_QUESTIONS), DEFAULT_MIN_QUESTIONS), DEFAULT_MAX_QUESTIONS)
+    except Exception:
+        return DEFAULT_MAX_QUESTIONS
+
+
+def _parse_structured_question(raw_question: Optional[str]) -> tuple[str, str, Optional[List[str]], Optional[str]]:
+    q_text = raw_question or ""
+    q_type = "open_ended"
+    options = None
+    initial_code = None
+
+    if not raw_question:
+        return q_text, q_type, options, initial_code
+
+    try:
+        q_data = json.loads(raw_question)
+        if isinstance(q_data, dict) and "type" in q_data:
+            q_text = q_data.get("text", "")
+            q_type = q_data.get("type", "open_ended")
+            options = q_data.get("options")
+            initial_code = q_data.get("initial_code")
+    except Exception:
+        pass
+
+    type_aliases = {
+        "text": "open_ended",
+        "mcq": "multiple_choice",
+        "multiple-choice": "multiple_choice",
+        "truefalse": "true_false",
+        "true/false": "true_false",
+    }
+    q_type = type_aliases.get(str(q_type).strip().lower(), str(q_type).strip().lower())
+
+    if q_type == "true_false" and not options:
+        options = ["True", "False"]
+
+    return q_text, q_type, options, initial_code
 
 class StartInterviewRequest(BaseModel):
     candidate_name: str
@@ -50,6 +97,7 @@ class StartInterviewResponse(BaseModel):
     question_type: str = "text"
     options: Optional[List[str]] = None
     initial_code: Optional[str] = None
+    current_topic: str = "background"
     question_number: int
     total_questions: int
 
@@ -63,6 +111,7 @@ class SubmitAnswerResponse(BaseModel):
     question_type: str = "text"
     options: Optional[List[str]] = None
     initial_code: Optional[str] = None
+    current_topic: str = "background"
     question_number: int
     total_questions: int
     is_complete: bool
@@ -111,21 +160,7 @@ def start_interview(request: StartInterviewRequest):
         
         first_question_raw = result.get("last_question", "Hello! Let's start the interview.")
         
-        # Parse structured question if JSON
-        q_text = first_question_raw
-        q_type = "text"
-        options = None
-        initial_code = None
-        try:
-            import json
-            q_data = json.loads(first_question_raw)
-            if isinstance(q_data, dict) and "type" in q_data:
-                q_text = q_data.get("text", "")
-                q_type = q_data.get("type", "text")
-                options = q_data.get("options")
-                initial_code = q_data.get("initial_code")
-        except:
-            pass
+        q_text, q_type, options, initial_code = _parse_structured_question(first_question_raw)
 
         # Store in-memory metadata for compatibility
         interview_sessions[session_id] = {
@@ -143,14 +178,15 @@ def start_interview(request: StartInterviewRequest):
             question_type=q_type,
             options=options,
             initial_code=initial_code,
+            current_topic=result.get("current_topic") or "background",
             question_number=1,
-            total_questions=5  # 5 required topics
+            total_questions=_question_limit()
         )
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error starting interview: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initialize interview: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to initialize interview. Please try again.")
 
 @router.post("/interview/answer", response_model=SubmitAnswerResponse)
 def submit_answer(request: SubmitAnswerRequest):
@@ -206,21 +242,7 @@ def submit_answer(request: SubmitAnswerRequest):
         next_question_raw = result.get("last_question") if not is_complete else None
         q_number = result.get("turn_count", 0) + 1
         
-        q_text = next_question_raw
-        q_type = "text"
-        options = None
-        initial_code = None
-        if next_question_raw:
-            try:
-                import json
-                q_data = json.loads(next_question_raw)
-                if isinstance(q_data, dict) and "type" in q_data:
-                    q_text = q_data.get("text", "")
-                    q_type = q_data.get("type", "text")
-                    options = q_data.get("options")
-                    initial_code = q_data.get("initial_code")
-            except:
-                pass
+        q_text, q_type, options, initial_code = _parse_structured_question(next_question_raw)
 
         final_score = None
         if is_complete:
@@ -246,8 +268,9 @@ def submit_answer(request: SubmitAnswerRequest):
             question_type=q_type,
             options=options,
             initial_code=initial_code,
+            current_topic=result.get("current_topic") or "",
             question_number=q_number,
-            total_questions=5,
+            total_questions=_question_limit(),
             is_complete=is_complete,
             score=turn_percentage,
             feedback=feedback,
@@ -257,7 +280,7 @@ def submit_answer(request: SubmitAnswerRequest):
         raise
     except Exception as e:
         print(f"Error submitting answer: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process answer: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process answer. Please try again.")
 
 @router.get("/interview/session/{session_id}")
 def get_session_status(session_id: str):
@@ -287,8 +310,9 @@ def get_session_status(session_id: str):
         "session_id": session_id,
         "candidate_name": values.get("candidate_name"),
         "completed": values.get("is_complete", False),
+        "current_topic": values.get("current_topic", ""),
         "question_number": values.get("turn_count", 0) + 1,
-        "total_questions": 5,
+        "total_questions": _question_limit(),
         "answers_so_far": len(values.get("answers", [])),
         "average_score": avg_score,
         "final_score": final_score
