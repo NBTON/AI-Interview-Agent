@@ -145,7 +145,43 @@ erDiagram
 4. **Resuming with Answer**: The candidate supplies an answer, setting `last_answer`. The graph resumes.
 5. **Evaluation & Memory Consolidation**: The Evaluation Agent scores the response. The Profile Builder Agent records the turn, appends extracted facts to `candidate_profiles`, and updates topic coverage.
 6. **Adaptive Probing**: If the Evaluation Agent set `needs_probe = true` (and we have probed less than 2 times on this topic), the topic is *not* marked as covered. The Interviewer Agent will generate a follow-up question related specifically to their previous response.
-7. **Wrap Up**: When all topics are complete, or the turn limit is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
+7. **Adaptive Continuation**: After required topics are covered, the interviewer can continue asking adaptive follow-up or assessment questions until the minimum interview length is satisfied.
+8. **Wrap Up**: Once at least 10 questions have been answered and coverage is sufficient, or the 30-question hard cap is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
+
+---
+
+## Project Directory Reorganization
+
+The codebase has been reorganized into a structured layout under a `src/` directory to cleanly separate application layers (agent, API backend, and Streamlit frontend):
+
+```
+Interview_Agent/
+├── src/
+│   ├── agent/            # LangGraph agent state machine, nodes, custom tools, and prompt definitions
+│   ├── backend/          # FastAPI API backend routers and server configuration
+│   └── frontend/         # Streamlit recruitment dashboard, candidate verification, and chatbot UI
+├── tests/                # Integration and persona-based simulation tests
+├── data/                 # Local Excel candidate spreadsheets (local fallbacks)
+├── supabase/             # PostgreSQL database schemas and migration scripts
+├── README.md             # Project documentation
+├── pyproject.toml        # Project configuration
+├── requirements.txt      # Project dependencies
+└── .env                  # Environment configurations (API keys, Supabase URLs)
+```
+
+---
+
+## Recent Integration Merge Details
+
+The recent merge successfully unified the Frontend (Streamlit), Backend (FastAPI), and Agent (LangGraph) layers:
+- **Unified Candidate Data Access**: Switched the Streamlit frontend from querying local Excel files directly to querying candidates through the FastAPI backend (`/api/candidates` and `/api/candidates/verify`), ensuring data integrity and database syncing.
+- **Offline and LLM Fallback Robustness**: Integrated OpenRouter models (`nex-agi/nex-n2-pro:free`, etc.) as secondary fallbacks when OpenAI credentials are not provided or rate limits occur. Created local rule-based evaluations for offline candidate scoring and probing, ensuring the system never hangs or crashes without APIs.
+- **Session Identity Propagation**: Fixed candidate verification workflows to store emails in frontend session states, cleanly routing verification states to the interview Chatbot. Added redirect guards to block unverified candidate entries.
+- **DB Syncing & Export**: Integrated candidate dashboard status updates directly with the Supabase database. Added an **Export to Excel** downloader in the Recruiter Dashboard for exporting candidate records on the fly.
+- **Adaptive Assessment Length**: Interviews now use an adaptive question count with a minimum of 10 answered questions and a hard cap of 30. The candidate UI intentionally does not expose the total question count.
+- **Expanded Question Types**: The interviewer can generate open-ended questions, MCQs, true/false questions, and coding exercises. Coding questions support bug-fix, completion, and implementation-style prompts.
+- **Candidate UI Refresh**: Removed unused top placeholder bars, simplified the progress sidebar, and added an IDE-style coding interface with an execution console.
+- **Performance Adjustments**: Added `120s` thread execution timeouts to prevent hanging calls.
 
 ---
 
@@ -173,7 +209,7 @@ SUPABASE_KEY=your_supabase_service_role_key_here
 ### Running the CLI Simulator
 Execute the interactive turn-by-turn interview simulator:
 ```bash
-python agent/main.py
+python src/agent/main.py
 ```
 
 ### Running Automated Tests
@@ -233,4 +269,35 @@ Here is an extract from `test_agent.py` showing how the agents coordinate to per
 🕵️‍♂️ [Evaluation Agent] Evaluating response for topic 'skills'...
 🗂️ [Profile Builder Agent] Saving details & updating memory for 'skills'...
 ✅ [Profile Builder Agent] Topic 'skills' coverage completed.
+```
+
+---
+
+## Web API & Frontend Interface
+
+### API Endpoints
+| Endpoint | Method | Status |
+| :--- | :--- | :--- |
+| `/health` | GET | ✅ Working |
+| `/api/candidates/verify` | POST | ✅ Working |
+| `/api/candidates` | GET | ✅ Working |
+| `/api/candidates/{name}` | GET | ✅ Working |
+| `/api/recruiter/login` | POST | ✅ Working |
+| `/api/interview/start` | POST | ✅ Working |
+| `/api/interview/answer` | POST | ✅ Working |
+| `/api/interview/session/{id}` | GET | ✅ Working |
+
+### Running the Web Application
+
+To run the complete application, you can start the backend FastAPI server and the Streamlit frontend interface.
+
+#### 1. Start the Backend API
+```bash
+uvicorn src.backend.main:app --reload --port 8000
+```
+
+#### 2. Start the Frontend Interface
+In a new terminal, run:
+```bash
+streamlit run src/frontend/app.py
 ```

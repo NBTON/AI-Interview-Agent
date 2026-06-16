@@ -53,10 +53,14 @@ def node_router(state: InterviewState) -> str:
         return "evaluate"
         
     reqs = get_program_requirements()
-    max_turns = reqs.get("max_turns", 15)
+    min_turns = reqs.get("min_turns", 10)
+    max_turns = reqs.get("max_turns", 30)
+    turn_count = state.get("turn_count", 0)
     
-    # Wrap up if all topics are covered or turn count limit reached
-    if not state.get("missing_info") or state.get("turn_count", 0) >= max_turns:
+    # Wrap up only after the adaptive minimum is satisfied, or at the hard cap.
+    if turn_count >= max_turns:
+        return "wrap_up"
+    if not state.get("missing_info") and turn_count >= min_turns:
         return "wrap_up"
         
     return "generate_question"
@@ -118,9 +122,25 @@ def node_profile_builder(state: InterviewState) -> dict:
         print(f"🔍 [Profile Builder Agent] Topic '{current_topic}' requires follow-up probing (consecutive probes: {new_probe_count}/2).")
     else:
         new_covered = list(set(state["topics_covered"] + [current_topic]))
-        new_missing = identify_missing_info(new_covered, reqs["required_topics"])
+        if current_topic == "background":
+            bg_score = state["scores"].get("background", 3)
+            # Inspect candidate response for work experience indicators
+            ans_text = state["last_answer"].lower() if state.get("last_answer") else ""
+            is_experienced = bg_score >= 4 or any(w in ans_text for w in ["work", "job", "developer", "engineer", "years", "senior", "lead"])
+            
+            if is_experienced:
+                # Experienced path: Skip education, go to experience -> projects -> skills
+                new_missing = [t for t in ["experience", "projects", "skills"] if t not in new_covered]
+                print("🔀 [Branching] Candidate identified as EXPERIENCED. Path: experience -> projects -> skills. Skipping education.")
+            else:
+                # Beginner/Student path: Go to education -> skills -> projects
+                new_missing = [t for t in ["education", "skills", "projects"] if t not in new_covered]
+                print("🔀 [Branching] Candidate identified as BEGINNER/STUDENT. Path: education -> skills -> projects. Skipping experience.")
+        else:
+            new_missing = identify_missing_info(new_covered, state["missing_info"])
+            
         new_probe_count = 0
-        print(f"✅ [Profile Builder Agent] Topic '{current_topic}' coverage completed.")
+        print(f"✅ [Profile Builder Agent] Topic '{current_topic}' coverage completed. Next topics remaining: {new_missing}")
         
     new_questions = state["questions_asked"] + [state["last_question"]]
     new_answers = state["answers"] + [state["last_answer"]]
@@ -143,6 +163,7 @@ def node_profile_builder(state: InterviewState) -> dict:
         "questions_asked": new_questions,
         "answers": new_answers,
         "turn_count": new_turn_count,
+        "current_topic": current_topic if new_probe_count > 0 else (new_missing[0] if new_missing else current_topic),
         "last_answer": "",  # Clear to avoid re-evaluation on loop
     }
 
@@ -159,9 +180,22 @@ def node_interviewer(state: InterviewState) -> dict:
         question = generate_probe_question(topic, prev_question, prev_answer)
     else:
         # Generate a new question on the next missing topic
-        topic = state["missing_info"][0] if state["missing_info"] else state["current_topic"]
+        if state["missing_info"]:
+            topic = state["missing_info"][0]
+        else:
+            required_topics = reqs.get("required_topics", ["skills", "projects"])
+            turn_count = state.get("turn_count", 0)
+            topic = required_topics[turn_count % len(required_topics)]
         print(f"🎤 [Interviewer Agent] Generating fresh question for topic '{topic}'...")
-        question = generate_question(topic, reqs, state["questions_asked"], state["candidate_id"])
+        
+        # Build context dict with scores and requirements
+        context_dict = {
+            **reqs,
+            "scores": state.get("scores", {}),
+            "topics_covered": state.get("topics_covered", []),
+            "candidate_name": state.get("candidate_name", "")
+        }
+        question = generate_question(topic, context_dict, state["questions_asked"], state["candidate_id"])
         
     # Log the question to conversation_messages
     log_message(state["session_id"], "assistant", question)
