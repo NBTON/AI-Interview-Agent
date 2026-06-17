@@ -8,27 +8,14 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-try:
-    from supabase import create_client, Client
-except Exception as exc:
-    create_client = None
-    Client = object
-    print(f"Supabase client import unavailable; using local fallback mode: {exc}")
+from db import get_supabase_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Load variables from the project-root .env file, overriding any pre-existing environment variables.
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
-_supabase_url = os.environ.get("SUPABASE_URL")
-_supabase_key = os.environ.get("SUPABASE_KEY")
-_db_client: Client = None
-
-if create_client and _supabase_url and _supabase_key and _supabase_key != "your_supabase_service_role_key_here":
-    try:
-        _db_client = create_client(_supabase_url, _supabase_key)
-    except Exception as e:
-        print(f"Error initializing Supabase client: {e}")
+_db_client = get_supabase_client()
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +131,7 @@ def _make_llm(temperature: float = 0.7):
 _llm = _make_llm(temperature=0.7)
 
 
-def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program_id: str = None) -> dict:
+def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program_id: str = None, session_id: str = None) -> dict:
     """Ensures candidate, session, and profile exist in Supabase and returns verified UUIDs."""
     raw_candidate_id = candidate_id
 
@@ -155,7 +142,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
         # Create deterministic UUID from string representation
         candidate_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"candidate.{candidate_id}"))
 
-    session_uuid = str(uuid.uuid4())
+    session_uuid = session_id or str(uuid.uuid4())
     
     # Resolve program ID
     prog_uuid = program_id

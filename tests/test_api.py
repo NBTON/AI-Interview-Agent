@@ -5,6 +5,7 @@ Run with: python test_api.py
 import requests
 import json
 import sys
+import os
 
 # Configure stdout/stderr encoding to support UTF-8 (emojis, etc.) on Windows consoles/logs
 if hasattr(sys.stdout, 'reconfigure'):
@@ -56,13 +57,22 @@ def test_recruiter_login():
     print("\n🔍 Testing Recruiter Login...")
     response = requests.post(
         f"{API_URL}/recruiter/login",
-        json={"email": "admin@example.com", "password": "12345"}
+        json={
+            "email": os.environ.get("RECRUITER_EMAIL", "recruiter@example.com"),
+            "password": os.environ.get("RECRUITER_PASSWORD", "replace_with_a_strong_password"),
+        }
     )
     print_response("Recruiter Login", response)
     return response
 
 def test_interview_flow():
     print("\n🔍 Testing Interview Flow...")
+    verify_response = test_candidate_verify()
+    candidate_token = None
+    try:
+        candidate_token = verify_response.json().get("candidate_token")
+    except Exception:
+        pass
     
     # 1. Start interview
     print("\n📝 Step 1: Starting interview...")
@@ -70,7 +80,8 @@ def test_interview_flow():
         f"{API_URL}/interview/start",
         json={
             "candidate_name": "Ahmed Al-Rashidi",
-            "candidate_email": "ahmed@example.com"
+            "candidate_email": "ahmed@example.com",
+            "candidate_token": candidate_token,
         }
     )
     

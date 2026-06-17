@@ -20,7 +20,8 @@ def node_init(state: InterviewState) -> dict:
     # Initialize DB candidate registry and session state
     db_info = ensure_candidate_and_session(
         candidate_id=state["candidate_id"],
-        candidate_name=state["candidate_name"]
+        candidate_name=state["candidate_name"],
+        session_id=state.get("session_id") or None
     )
     
     greeting_question = "Hello! Welcome to the interview. Let's get started."

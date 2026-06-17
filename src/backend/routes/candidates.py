@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from supabase import create_client, Client
+from backend.security import create_candidate_token
 
 router = APIRouter(tags=["Candidates"])
 
@@ -129,6 +130,7 @@ def verify_candidate(request: CandidateVerify):
             "success": True,
             "name": candidate_name,
             "email": request.email,
+            "candidate_token": create_candidate_token(request.email),
             "message": "Email verified successfully"
         }
     else:
