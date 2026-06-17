@@ -10,7 +10,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Flowable
 
 st.set_page_config(page_title="Recruiter Panel", page_icon="💼", layout="wide")
 
@@ -337,6 +337,84 @@ def clean_for_pdf(text: str) -> str:
 def escape_for_paragraph(text: str) -> str:
     return xml_escape(clean_for_pdf(text))
 
+PDF_NAVY = colors.HexColor("#0A1628")
+PDF_INK = colors.HexColor("#172033")
+PDF_MUTED = colors.HexColor("#667085")
+PDF_TEAL = colors.HexColor("#00A88B")
+PDF_GOLD = colors.HexColor("#FFB547")
+PDF_RED = colors.HexColor("#D92D20")
+PDF_BLUE = colors.HexColor("#2E90FA")
+PDF_LIGHT = colors.HexColor("#F4F7FB")
+PDF_BORDER = colors.HexColor("#D8E2EF")
+
+
+class ScoreGauge(Flowable):
+    def __init__(self, score_percent: float, width: float = 1.65 * inch, height: float = 1.15 * inch):
+        super().__init__()
+        self.score_percent = max(0, min(float(score_percent or 0), 100))
+        self.width = width
+        self.height = height
+
+    def draw(self):
+        canvas = self.canv
+        radius = 34
+        center_x = self.width / 2
+        center_y = 38
+        canvas.setLineWidth(9)
+        canvas.setStrokeColor(colors.HexColor("#DDE7F3"))
+        canvas.arc(center_x - radius, center_y - radius, center_x + radius, center_y + radius, 180, -180)
+        canvas.setStrokeColor(PDF_TEAL if self.score_percent >= 70 else PDF_GOLD if self.score_percent >= 50 else PDF_RED)
+        canvas.arc(center_x - radius, center_y - radius, center_x + radius, center_y + radius, 180, -180 * (self.score_percent / 100))
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 18)
+        canvas.drawCentredString(center_x, center_y - 3, f"{self.score_percent:.0f}%")
+        canvas.setFillColor(colors.HexColor("#D6E3F0"))
+        canvas.setFont("Helvetica", 7)
+        canvas.drawCentredString(center_x, 9, "overall score")
+
+
+class TopicBar(Flowable):
+    def __init__(self, label: str, score_percent: float, width: float = 4.6 * inch, height: float = 0.28 * inch):
+        super().__init__()
+        self.label = clean_for_pdf(label).title()
+        self.score_percent = max(0, min(float(score_percent or 0), 100))
+        self.width = width
+        self.height = height
+
+    def draw(self):
+        canvas = self.canv
+        label_width = 1.15 * inch
+        bar_x = label_width
+        bar_w = self.width - label_width - 0.45 * inch
+        fill_w = bar_w * (self.score_percent / 100)
+        color = PDF_TEAL if self.score_percent >= 70 else PDF_GOLD if self.score_percent >= 50 else PDF_RED
+        canvas.setFillColor(PDF_INK)
+        canvas.setFont("Helvetica-Bold", 7.5)
+        canvas.drawString(0, 3, self.label[:18])
+        canvas.setFillColor(colors.HexColor("#E9EEF5"))
+        canvas.roundRect(bar_x, 2, bar_w, 7, 3, fill=1, stroke=0)
+        canvas.setFillColor(color)
+        canvas.roundRect(bar_x, 2, max(fill_w, 3), 7, 3, fill=1, stroke=0)
+        canvas.setFillColor(PDF_MUTED)
+        canvas.setFont("Helvetica-Bold", 7)
+        canvas.drawRightString(self.width, 2, f"{self.score_percent:.0f}%")
+
+
+def draw_pdf_page(canvas, doc):
+    canvas.saveState()
+    page_width, page_height = letter
+    canvas.setFillColor(PDF_NAVY)
+    canvas.rect(0, page_height - 0.36 * inch, page_width, 0.36 * inch, fill=1, stroke=0)
+    canvas.setFillColor(PDF_TEAL)
+    canvas.rect(0, page_height - 0.39 * inch, page_width, 0.03 * inch, fill=1, stroke=0)
+    canvas.setFillColor(colors.white)
+    canvas.setFont("Helvetica-Bold", 8)
+    canvas.drawString(0.6 * inch, page_height - 0.23 * inch, "AI Interview Agent - Candidate Evaluation")
+    canvas.setFillColor(PDF_MUTED)
+    canvas.setFont("Helvetica", 7)
+    canvas.drawRightString(page_width - 0.6 * inch, 0.32 * inch, f"Page {doc.page}")
+    canvas.restoreState()
+
 # -----------------------------
 # DASHBOARD PAGE
 # -----------------------------
@@ -599,36 +677,168 @@ elif st.session_state.active_page == "reports":
                     st.info("No chat messages were recorded for this session.")
 
             def generate_reportlab_pdf() -> bytes:
+                def make_topic_rows() -> list[dict]:
+                    rows = []
+                    score_payload = report.get("topic_scores") or {}
+                    if isinstance(score_payload, dict) and score_payload.get("topic_scores"):
+                        for topic, info in score_payload["topic_scores"].items():
+                            if isinstance(info, dict):
+                                rows.append({
+                                    "topic": topic,
+                                    "score": round(float(info.get("final_topic_score") or 0) * 20, 1),
+                                    "turns": len(info.get("turn_scores") or []),
+                                })
+                    if not rows:
+                        seen_topics = {}
+                        for turn in turns:
+                            topic = str(turn.get("topic") or "General")
+                            try:
+                                turn_score = float(turn.get("score") or 0) * 20
+                            except (TypeError, ValueError):
+                                turn_score = 0
+                            seen_topics.setdefault(topic, []).append(turn_score)
+                        rows = [
+                            {"topic": topic, "score": round(sum(scores) / len(scores), 1), "turns": len(scores)}
+                            for topic, scores in seen_topics.items()
+                            if scores
+                        ]
+                    return rows
+
+                topic_rows = make_topic_rows()
+                decision_color = {
+                    "ACCEPT": PDF_TEAL,
+                    "REVIEW": PDF_GOLD,
+                    "REJECT": PDF_RED,
+                }.get(recommendation, PDF_BLUE)
+
                 buffer = io.BytesIO()
                 doc = SimpleDocTemplate(
                     buffer,
                     pagesize=letter,
-                    rightMargin=0.6 * inch,
-                    leftMargin=0.6 * inch,
-                    topMargin=0.6 * inch,
-                    bottomMargin=0.6 * inch,
+                    rightMargin=0.55 * inch,
+                    leftMargin=0.55 * inch,
+                    topMargin=0.62 * inch,
+                    bottomMargin=0.55 * inch,
                 )
                 styles = getSampleStyleSheet()
-                styles.add(ParagraphStyle(name="SmallBody", parent=styles["BodyText"], fontSize=9, leading=12))
-                story = [
-                    Paragraph("Candidate Evaluation Snapshot", styles["Title"]),
-                    Paragraph(f"Generated on {pd.Timestamp.now().strftime('%Y-%m-%d')}", styles["SmallBody"]),
-                    Spacer(1, 0.15 * inch),
-                    Table(
+                styles["Title"].fontName = "Helvetica-Bold"
+                styles["Title"].fontSize = 22
+                styles["Title"].leading = 26
+                styles["Title"].textColor = PDF_NAVY
+                styles["Heading2"].fontName = "Helvetica-Bold"
+                styles["Heading2"].fontSize = 13
+                styles["Heading2"].leading = 16
+                styles["Heading2"].textColor = PDF_NAVY
+                styles["Heading3"].fontName = "Helvetica-Bold"
+                styles["Heading3"].fontSize = 10
+                styles["Heading3"].leading = 12
+                styles["Heading3"].textColor = PDF_INK
+                styles["BodyText"].fontSize = 9
+                styles["BodyText"].leading = 12.5
+                styles["BodyText"].textColor = PDF_INK
+                styles.add(ParagraphStyle(name="SmallBody", parent=styles["BodyText"], fontSize=8, leading=10.5, textColor=PDF_MUTED))
+                styles.add(ParagraphStyle(name="WhiteTitle", parent=styles["Title"], fontSize=20, leading=24, textColor=colors.white))
+                styles.add(ParagraphStyle(name="WhiteSmall", parent=styles["SmallBody"], textColor=colors.HexColor("#D6E3F0")))
+                styles.add(ParagraphStyle(name="CalloutTitle", parent=styles["Heading3"], textColor=PDF_TEAL))
+
+                hero = Table(
+                    [[
                         [
-                            ["Candidate", clean_for_pdf(name), "Score", f"{score_value:.1f}%"],
-                            ["Email", clean_for_pdf(email or "Not recorded"), "Decision", recommendation],
-                            ["Program", clean_for_pdf(position), "Status", clean_for_pdf(status)],
+                            Paragraph("Candidate Evaluation Snapshot", styles["WhiteTitle"]),
+                            Paragraph(f"Generated on {pd.Timestamp.now().strftime('%Y-%m-%d')}", styles["WhiteSmall"]),
                         ],
-                        colWidths=[1.0 * inch, 2.8 * inch, 0.9 * inch, 1.5 * inch],
-                    ),
-                    Spacer(1, 0.2 * inch),
+                        ScoreGauge(score_value),
+                    ]],
+                    colWidths=[4.65 * inch, 1.6 * inch],
+                )
+                hero.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), PDF_NAVY),
+                    ("BOX", (0, 0), (-1, -1), 0, PDF_NAVY),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 18),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+                    ("TOPPADDING", (0, 0), (-1, -1), 16),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 16),
+                ]))
+
+                summary_table = Table(
+                    [
+                        ["Candidate", clean_for_pdf(name), "Decision", recommendation],
+                        ["Email", clean_for_pdf(email or "Not recorded"), "Status", clean_for_pdf(status).title()],
+                        ["Program", clean_for_pdf(position), "Session", clean_for_pdf(session.get("id", candidate_data.get("session_id") or "No session"))],
+                    ],
+                    colWidths=[0.8 * inch, 2.65 * inch, 0.75 * inch, 2.05 * inch],
+                )
+                summary_table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                    ("BOX", (0, 0), (-1, -1), 0.8, PDF_BORDER),
+                    ("LINEBELOW", (0, 0), (-1, 1), 0.35, PDF_BORDER),
+                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                    ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+                    ("TEXTCOLOR", (0, 0), (0, -1), PDF_MUTED),
+                    ("TEXTCOLOR", (2, 0), (2, -1), PDF_MUTED),
+                    ("TEXTCOLOR", (3, 0), (3, 0), decision_color),
+                    ("FONTNAME", (3, 0), (3, 0), "Helvetica-Bold"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("PADDING", (0, 0), (-1, -1), 7),
+                ]))
+
+                kpi_table = Table(
+                    [[
+                        Paragraph(f"<b>{score_value:.1f}%</b><br/><font color='#667085'>Overall Score</font>", styles["BodyText"]),
+                        Paragraph(f"<b>{recommendation}</b><br/><font color='#667085'>Recommendation</font>", styles["BodyText"]),
+                        Paragraph(f"<b>{len(turns)}</b><br/><font color='#667085'>Evaluated Turns</font>", styles["BodyText"]),
+                    ]],
+                    colWidths=[2.05 * inch, 2.05 * inch, 2.05 * inch],
+                )
+                kpi_table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), PDF_LIGHT),
+                    ("BOX", (0, 0), (-1, -1), 0.8, PDF_BORDER),
+                    ("LINEBEFORE", (1, 0), (-1, -1), 0.5, PDF_BORDER),
+                    ("PADDING", (0, 0), (-1, -1), 10),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ]))
+
+                story = [hero, Spacer(1, 0.16 * inch), summary_table, Spacer(1, 0.12 * inch), kpi_table, Spacer(1, 0.22 * inch)]
+
+                if topic_rows:
+                    topic_visuals = [[TopicBar(row["topic"], row["score"])] for row in topic_rows[:8]]
+                    topic_table = Table(topic_visuals, colWidths=[4.8 * inch])
+                    topic_table.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                        ("BOX", (0, 0), (-1, -1), 0.8, PDF_BORDER),
+                        ("PADDING", (0, 0), (-1, -1), 6),
+                    ]))
+                    story.extend([
+                        Paragraph("Topic Score Profile", styles["Heading2"]),
+                        Spacer(1, 0.05 * inch),
+                        topic_table,
+                        Spacer(1, 0.18 * inch),
+                    ])
+
+                callout_table = Table(
+                    [[
+                        [Paragraph("Strengths", styles["CalloutTitle"]), Paragraph(escape_for_paragraph(report.get("strengths") or "Not recorded."), styles["SmallBody"])],
+                        [Paragraph("Risks / Gaps", styles["Heading3"]), Paragraph(escape_for_paragraph(report.get("weaknesses") or "Not recorded."), styles["SmallBody"])],
+                    ]],
+                    colWidths=[3.05 * inch, 3.05 * inch],
+                )
+                callout_table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#ECFDF3")),
+                    ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#FFF7E6")),
+                    ("BOX", (0, 0), (-1, -1), 0.8, PDF_BORDER),
+                    ("LINEBEFORE", (1, 0), (1, 0), 0.5, PDF_BORDER),
+                    ("PADDING", (0, 0), (-1, -1), 10),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]))
+
+                story = [
+                    *story,
                     Paragraph("Final Evaluation", styles["Heading2"]),
                     Paragraph(escape_for_paragraph(report.get("summary") or "No final summary recorded."), styles["BodyText"]),
-                    Paragraph("Strengths", styles["Heading3"]),
-                    Paragraph(escape_for_paragraph(report.get("strengths") or "Not recorded."), styles["BodyText"]),
-                    Paragraph("Weaknesses", styles["Heading3"]),
-                    Paragraph(escape_for_paragraph(report.get("weaknesses") or "Not recorded."), styles["BodyText"]),
+                    Spacer(1, 0.09 * inch),
+                    callout_table,
+                    Spacer(1, 0.12 * inch),
                     Paragraph("Decision Notes", styles["Heading3"]),
                     Paragraph(escape_for_paragraph(report.get("decision_notes") or "Not recorded."), styles["BodyText"]),
                     Spacer(1, 0.2 * inch),
@@ -636,29 +846,34 @@ elif st.session_state.active_page == "reports":
                 ]
 
                 for turn in turns:
+                    try:
+                        turn_score = float(turn.get("score") or 0) * 20
+                    except (TypeError, ValueError):
+                        turn_score = 0
+                    score_color = PDF_TEAL if turn_score >= 70 else PDF_GOLD if turn_score >= 50 else PDF_RED
+                    turn_header = Table(
+                        [[
+                            Paragraph(escape_for_paragraph(f"Turn {turn.get('turn_number')} - {str(turn.get('topic') or 'General').title()}"), styles["Heading3"]),
+                            Paragraph(escape_for_paragraph(f"{turn.get('score', 'N/A')}/5"), styles["Heading3"]),
+                        ]],
+                        colWidths=[5.2 * inch, 0.8 * inch],
+                    )
+                    turn_header.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF6FF")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, PDF_BORDER),
+                        ("TEXTCOLOR", (1, 0), (1, 0), score_color),
+                        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                        ("PADDING", (0, 0), (-1, -1), 6),
+                    ]))
                     story.extend([
-                        Paragraph(
-                            escape_for_paragraph(f"Turn {turn.get('turn_number')} - {turn.get('topic')} - Score {turn.get('score', 'N/A')}/5"),
-                            styles["Heading3"],
-                        ),
+                        turn_header,
                         Paragraph(escape_for_paragraph(f"Question: {turn.get('question') or 'Not recorded.'}"), styles["SmallBody"]),
                         Paragraph(escape_for_paragraph(f"Answer: {turn.get('answer') or 'Not recorded.'}"), styles["SmallBody"]),
                         Paragraph(escape_for_paragraph(f"Feedback: {turn.get('feedback') or 'Not recorded.'}"), styles["SmallBody"]),
-                        Spacer(1, 0.08 * inch),
+                        Spacer(1, 0.09 * inch),
                     ])
 
-                for item in story:
-                    if isinstance(item, Table):
-                        item.setStyle(TableStyle([
-                            ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
-                            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-                            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                            ("PADDING", (0, 0), (-1, -1), 6),
-                        ]))
-
-                doc.build(story)
+                doc.build(story, onFirstPage=draw_pdf_page, onLaterPages=draw_pdf_page)
                 return buffer.getvalue()
 
             try:

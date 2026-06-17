@@ -346,8 +346,10 @@ def submit_answer(request: SubmitAnswerRequest):
             raise HTTPException(status_code=404, detail="State not found for session")
         last_question = state.values.get("last_question") if state and state.values else ""
         
-        # Update state with the candidate's answer
-        graph.update_state(config, {"last_answer": request.answer})
+        # Update the interrupted state as if the candidate answered the
+        # interviewer node. This preserves the pending edge into evaluation
+        # across LangGraph checkpoint/resume versions.
+        graph.update_state(config, {"last_answer": request.answer}, as_node="interviewer")
         
         # Resume the graph with timeout protection
         with concurrent.futures.ThreadPoolExecutor() as executor:
