@@ -9,7 +9,8 @@ class InterviewState(TypedDict):
     topics_covered: List[str]
     questions_asked: List[str]
     answers: List[str]               # parallel list to questions_asked
-    scores: dict                     # {"experience": 3, "skills": 4, ...}
+    # Nested scores: { summary_metrics: { overall_score, total_turns_taken, tier_assigned }, topic_scores: { topic: { final_topic_score, turns: [{ turn_number, score, feedback, extracted_skills, extracted_info }] } } }
+    scores: dict                     
     missing_info: List[str]          # topics not yet sufficiently covered
     last_question: str
     last_answer: str
@@ -21,4 +22,7 @@ class InterviewState(TypedDict):
     feedback: str                    # evaluation feedback of last turn
     is_complete: bool
     final_report: Optional[dict]
+    tier_assigned: Optional[str]     # "advanced_track" or "beginner_adaptive"
+    skills_max_turns: Optional[int]  # customized turn count constraint for skills topic
+
 

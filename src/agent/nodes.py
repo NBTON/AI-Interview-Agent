@@ -35,7 +35,10 @@ def node_init(state: InterviewState) -> dict:
         "topics_covered": [],
         "questions_asked": [],
         "answers": [],
-        "scores": {},
+        "scores": {
+            "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
+            "topic_scores": {}
+        },
         "probe_count": 0,
         "needs_probe": False,
         "turn_count": 0,
@@ -43,7 +46,9 @@ def node_init(state: InterviewState) -> dict:
         "feedback": "",
         "extracted_skills": [],
         "extracted_info": {},
-        "last_answer": ""
+        "last_answer": "",
+        "tier_assigned": "",
+        "skills_max_turns": 3
     }
 
 
@@ -78,14 +83,44 @@ def node_evaluation(state: InterviewState) -> dict:
         rubric=reqs["rubric"]
     )
     
-    new_scores = {**state["scores"], current_topic: eval_result["score"]}
+    # Update nested scores structure in state
+    scores = dict(state.get("scores") or {})
+    if not scores or "topic_scores" not in scores:
+        scores = {
+            "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": state.get("tier_assigned", "") },
+            "topic_scores": {}
+        }
+    
+    topic_data = scores["topic_scores"].setdefault(current_topic, {
+        "final_topic_score": 0.0,
+        "turns": []
+    })
+    
+    new_turn = {
+        "turn_number": state["turn_count"] + 1,
+        "score": eval_result["score"],
+        "feedback": eval_result["feedback"],
+        "extracted_skills": eval_result["extracted_skills"],
+        "extracted_info": eval_result["extracted_info"]
+    }
+    # Deduplicate by turn_number
+    topic_data["turns"] = [t for t in topic_data["turns"] if t.get("turn_number") != new_turn["turn_number"]]
+    topic_data["turns"].append(new_turn)
+    
+    # Recalculate topic final score
+    valid_scores = [t["score"] for t in topic_data["turns"] if t.get("score") is not None]
+    topic_data["final_topic_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+    
+    # Recalculate summary metrics
+    scores["summary_metrics"]["total_turns_taken"] = sum(len(topic_info["turns"]) for topic_info in scores["topic_scores"].values())
+    scores["summary_metrics"]["overall_score"] = calculate_score(scores)
     
     return {
         "feedback": eval_result["feedback"],
         "needs_probe": eval_result["needs_probe"],
         "extracted_skills": eval_result["extracted_skills"],
         "extracted_info": eval_result["extracted_info"],
-        "scores": new_scores
+        "scores": scores
     }
 
 
@@ -93,8 +128,10 @@ def node_profile_builder(state: InterviewState) -> dict:
     current_topic = state["current_topic"]
     print(f"🗂️ [Profile Builder Agent] Saving details & updating memory for '{current_topic}'...")
     
+    topic_score = state["scores"].get("topic_scores", {}).get(current_topic, {}).get("final_topic_score", 3.0)
+    
     eval_result = {
-        "score": state["scores"].get(current_topic, 3),
+        "score": int(round(topic_score)),
         "feedback": state["feedback"],
         "needs_probe": state["needs_probe"],
         "extracted_skills": state["extracted_skills"],
@@ -102,31 +139,38 @@ def node_profile_builder(state: InterviewState) -> dict:
     }
     
     # Save the turn details and update candidate_profiles structured memory (long-term memory)
-    record_turn_and_update_profile(
+    success, updated_scores = record_turn_and_update_profile(
         session_id=state["session_id"],
         candidate_id=state["candidate_id"],
         turn_number=state["turn_count"] + 1,
         topic=current_topic,
         question=state["last_question"],
         answer=state["last_answer"],
-        eval_result=eval_result
+        eval_result=eval_result,
+        current_scores=state["scores"]
     )
     
     reqs = get_program_requirements()
     
+    # STEP 6: Skills turn count limit constraint
+    max_probes = 2
+    if current_topic == "skills":
+        skills_limit = state.get("skills_max_turns", 3)
+        max_probes = max(0, skills_limit - 1)
+    
     # Determine if we should probe or finalize coverage of this topic
-    if state["needs_probe"] and state["probe_count"] < 2:
+    if state["needs_probe"] and state["probe_count"] < max_probes:
         new_covered = state["topics_covered"]
         new_missing = state["missing_info"]
         new_probe_count = state["probe_count"] + 1
-        print(f"🔍 [Profile Builder Agent] Topic '{current_topic}' requires follow-up probing (consecutive probes: {new_probe_count}/2).")
+        print(f"🔍 [Profile Builder Agent] Topic '{current_topic}' requires follow-up probing (consecutive probes: {new_probe_count}/{max_probes}).")
     else:
         new_covered = list(set(state["topics_covered"] + [current_topic]))
         if current_topic == "background":
-            bg_score = state["scores"].get("background", 3)
+            bg_score = updated_scores.get("topic_scores", {}).get("background", {}).get("final_topic_score", 3.0)
             # Inspect candidate response for work experience indicators
             ans_text = state["last_answer"].lower() if state.get("last_answer") else ""
-            is_experienced = bg_score >= 4 or any(w in ans_text for w in ["work", "job", "developer", "engineer", "years", "senior", "lead"])
+            is_experienced = bg_score >= 4.0 or any(w in ans_text for w in ["work", "job", "developer", "engineer", "years", "senior", "lead"])
             
             if is_experienced:
                 # Experienced path: Skip education, go to experience -> projects -> skills
@@ -153,7 +197,7 @@ def node_profile_builder(state: InterviewState) -> dict:
         covered=new_covered,
         missing=new_missing,
         count=new_turn_count,
-        scores=state["scores"]
+        scores=updated_scores
     )
     
     return {
@@ -165,6 +209,7 @@ def node_profile_builder(state: InterviewState) -> dict:
         "turn_count": new_turn_count,
         "current_topic": current_topic if new_probe_count > 0 else (new_missing[0] if new_missing else current_topic),
         "last_answer": "",  # Clear to avoid re-evaluation on loop
+        "scores": updated_scores
     }
 
 
@@ -219,4 +264,37 @@ def node_wrap_up(state: InterviewState) -> dict:
     return {
         "is_complete": True,
         "final_report": report
+    }
+
+
+def determine_next_topic_routing(state: InterviewState) -> dict:
+    """
+    LangGraph routing node that inspects background score and assigns adaptive track and constraints.
+    """
+    scores = state.get("scores") or {}
+    topic_scores = scores.get("topic_scores", {})
+    bg_info = topic_scores.get("background", {})
+    bg_score = bg_info.get("final_topic_score")
+    
+    tier = state.get("tier_assigned", "")
+    skills_limit = state.get("skills_max_turns", 3)
+    
+    if bg_score is not None and not tier:
+        if bg_score >= 4.0:
+            tier = "advanced_track"
+            skills_limit = 5
+            print(f"🔀 [Adaptive Routing] Background score is {bg_score} >= 4.0. Assigning candidate to 'advanced_track' (up to 5 turns for skills).")
+        else:
+            tier = "beginner_adaptive"
+            skills_limit = 2
+            print(f"🔀 [Adaptive Routing] Background score is {bg_score} < 4.0. Assigning candidate to 'beginner_adaptive' (up to 2 turns for skills).")
+            
+    updated_scores = dict(scores)
+    if "summary_metrics" in updated_scores:
+        updated_scores["summary_metrics"]["tier_assigned"] = tier
+        
+    return {
+        "scores": updated_scores,
+        "tier_assigned": tier,
+        "skills_max_turns": skills_limit
     }
