@@ -44,6 +44,71 @@ DEFAULT_MIN_QUESTIONS = 10
 DEFAULT_MAX_QUESTIONS = 30
 
 
+def _normalize_scores_payload(scores: Optional[dict]) -> dict:
+    if not isinstance(scores, dict):
+        return {"summary_metrics": {"overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": ""}, "topic_scores": {}}
+    if "topic_scores" not in scores:
+        topic_scores = {
+            topic: {"final_topic_score": value, "turn_scores": []}
+            for topic, value in scores.items()
+            if isinstance(value, (int, float))
+        }
+        overall = sum(topic["final_topic_score"] for topic in topic_scores.values()) / len(topic_scores) if topic_scores else 0.0
+        return {
+            "summary_metrics": {"overall_score": round(overall, 2), "total_turns_taken": 0, "tier_assigned": ""},
+            "topic_scores": topic_scores,
+        }
+
+    normalized = {
+        "summary_metrics": dict(scores.get("summary_metrics") or {}),
+        "topic_scores": {},
+    }
+    for topic, info in (scores.get("topic_scores") or {}).items():
+        if not isinstance(info, dict):
+            continue
+        turn_scores = info.get("turn_scores")
+        if turn_scores is None:
+            turn_scores = info.get("turns", [])
+        normalized["topic_scores"][topic] = {
+            "final_topic_score": info.get("final_topic_score", 0.0),
+            "turn_scores": turn_scores if isinstance(turn_scores, list) else [],
+        }
+    return normalized
+
+
+def _latest_turn_score(scores: Optional[dict], topic: Optional[str] = None) -> float:
+    normalized = _normalize_scores_payload(scores)
+    topic_scores = normalized.get("topic_scores", {})
+    candidates = []
+    topics = [topic] if topic and topic in topic_scores else list(topic_scores.keys())
+    for topic_name in topics:
+        for turn in topic_scores.get(topic_name, {}).get("turn_scores", []):
+            if isinstance(turn, dict) and turn.get("score") is not None:
+                candidates.append(turn)
+    if candidates:
+        latest_turn = max(candidates, key=lambda turn: turn.get("turn_number", 0))
+        return float(latest_turn.get("score", 3.0))
+    if topic and topic in topic_scores:
+        return float(topic_scores[topic].get("final_topic_score", 3.0))
+    return 3.0
+
+
+def _score_payload_average_percentage(scores: Optional[dict]) -> float:
+    normalized = _normalize_scores_payload(scores)
+    summary = normalized.get("summary_metrics", {})
+    if summary.get("overall_score") is not None:
+        try:
+            return (float(summary.get("overall_score")) / 5.0) * 100
+        except (TypeError, ValueError):
+            pass
+    final_scores = [
+        float(info.get("final_topic_score"))
+        for info in normalized.get("topic_scores", {}).values()
+        if isinstance(info, dict) and info.get("final_topic_score") is not None
+    ]
+    return (sum(final_scores) / len(final_scores) / 5.0) * 100 if final_scores else 0.0
+
+
 def _question_limit() -> int:
     try:
         from agent.tools import get_program_requirements
@@ -229,6 +294,9 @@ def start_interview(request: StartInterviewRequest):
         "feedback": "",
         "is_complete": False,
         "final_report": None,
+        "tier_assigned": "",
+        "skills_max_turns": 3,
+        "topic_depths": {},
     }
     
     try:
@@ -292,16 +360,10 @@ def submit_answer(request: SubmitAnswerRequest):
         is_complete = result.get("is_complete", False)
         feedback = result.get("feedback")
         
-        # Calculate turn score percentage
+        # Calculate turn score percentage from the nested score payload.
         scores = result.get("scores", {})
-        last_score_val = 3.0
-        topics_covered = result.get("topics_covered", [])
-        if topics_covered:
-            last_topic = topics_covered[-1]
-            last_score_val = scores.get(last_topic, 3.0)
-        elif result.get("current_topic") in scores:
-            last_score_val = scores.get(result["current_topic"], 3.0)
-            
+        previous_topic = state.values.get("current_topic") if state and state.values else None
+        last_score_val = _latest_turn_score(scores, previous_topic)
         turn_percentage = (last_score_val / 5.0) * 100
         
         # Next question
@@ -361,9 +423,7 @@ def get_session_status(session_id: str):
         
     values = state.values
     scores = session.get("scores") or values.get("scores", {})
-    avg_score = 0.0
-    if scores:
-        avg_score = (sum(scores.values()) / len(scores) / 5.0) * 100
+    avg_score = _score_payload_average_percentage(scores)
         
     final_score = _fetch_final_score(session_id)
         

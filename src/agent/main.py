@@ -37,7 +37,8 @@ initial_state = {
     "is_complete": False,
     "final_report": None,
     "tier_assigned": "",
-    "skills_max_turns": 3
+    "skills_max_turns": 3,
+    "topic_depths": {}
 }
 
 config = {"configurable": {"thread_id": "test-001"}}

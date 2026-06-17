@@ -168,7 +168,7 @@ COMMENT ON TABLE  interview_sessions IS 'Tracks each interview run — mirrors L
 COMMENT ON COLUMN interview_sessions.current_topic  IS 'The topic currently being asked about.';
 COMMENT ON COLUMN interview_sessions.topics_covered IS 'Array of topics that have been sufficiently covered.';
 COMMENT ON COLUMN interview_sessions.missing_topics IS 'Array of required topics not yet covered — used by identify_missing_info().';
-COMMENT ON COLUMN interview_sessions.scores         IS 'Running map of topic → score: {"experience": 3, "skills": 4}.';
+COMMENT ON COLUMN interview_sessions.scores         IS 'Nested score payload: {"summary_metrics": {...}, "topic_scores": {"skills": {"final_topic_score": 4.0, "turn_scores": [...]}}}.';
 
 CREATE INDEX idx_sessions_candidate ON interview_sessions(candidate_id);
 CREATE INDEX idx_sessions_program   ON interview_sessions(program_id);
@@ -245,7 +245,7 @@ CREATE TABLE interview_reports (
 );
 
 COMMENT ON TABLE  interview_reports IS 'Final interview assessment report for decision support.';
-COMMENT ON COLUMN interview_reports.topic_scores   IS 'JSON: {"background": 3, "skills": 4, "experience": 5, ...}.';
+COMMENT ON COLUMN interview_reports.topic_scores   IS 'Nested score payload copied from interview_sessions.scores for final reporting.';
 COMMENT ON COLUMN interview_reports.overall_score  IS 'Weighted or averaged score (0.00–5.00).';
 COMMENT ON COLUMN interview_reports.recommendation IS 'Agent recommendation: accept, reject, or review.';
 COMMENT ON COLUMN interview_reports.decision_notes IS 'Additional context for the admissions team.';

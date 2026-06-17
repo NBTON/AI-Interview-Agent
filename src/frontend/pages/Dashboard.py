@@ -1,10 +1,16 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from fpdf import FPDF
 from pathlib import Path
 import requests
 import io
+import os
+from xml.sax.saxutils import escape as xml_escape
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 st.set_page_config(page_title="Recruiter Panel", page_icon="💼", layout="wide")
 
@@ -280,23 +286,37 @@ st.markdown('</div>', unsafe_allow_html=True)
 # -----------------------------
 st.markdown('<div class="section-box">', unsafe_allow_html=True)
 
-API_URL = "http://localhost:8000/api"
-df = pd.DataFrame(columns=["id", "name", "email", "position", "status", "score"])
+API_URL = os.environ.get("API_URL", "http://localhost:8000/api").rstrip("/")
+df = pd.DataFrame(columns=["id", "name", "email", "position", "status", "score", "report_id", "session_id", "recommendation"])
+dashboard_stats = {}
+
+def api_get(path: str):
+    response = requests.get(f"{API_URL}{path}", timeout=20)
+    if response.status_code == 503:
+        st.error("Live recruiter analytics require Supabase configuration. No sample recruiter data is available.")
+        st.stop()
+    if response.status_code != 200:
+        detail = response.text
+        try:
+            detail = response.json().get("detail", detail)
+        except Exception:
+            pass
+        raise RuntimeError(detail)
+    return response.json()
 
 try:
-    response = requests.get(f"{API_URL}/candidates")
-    if response.status_code == 200:
-        candidates_data = response.json()["candidates"]
-        if candidates_data:
-            df = pd.DataFrame(candidates_data)
-            if "position" not in df.columns:
-                df["position"] = "Agentic AI"
-            if "score" not in df.columns:
-                df["score"] = 0.0
-            if "status" not in df.columns:
-                df["status"] = "Pending"
-    else:
-        st.error("Failed to load candidate data from backend API.")
+    dashboard_stats = api_get("/recruiter/dashboard")
+    candidates_data = api_get("/recruiter/candidates")
+    if candidates_data:
+        df = pd.DataFrame(candidates_data)
+        df = df.rename(columns={"bootcamp": "position"})
+        if "position" not in df.columns:
+            df["position"] = "Agentic AI"
+        if "score" not in df.columns:
+            df["score"] = 0.0
+        df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0.0)
+        if "status" not in df.columns:
+            df["status"] = "new"
 except Exception as e:
     st.error(f"Error connecting to backend API: {e}")
     st.info("Please make sure the backend uvicorn server is running on http://localhost:8000")
@@ -314,6 +334,9 @@ def clean_for_pdf(text: str) -> str:
             else: cleaned += "?"
     return cleaned
 
+def escape_for_paragraph(text: str) -> str:
+    return xml_escape(clean_for_pdf(text))
+
 # -----------------------------
 # DASHBOARD PAGE
 # -----------------------------
@@ -330,13 +353,13 @@ if st.session_state.active_page == "dashboard":
     if df.empty:
         st.warning("No candidate records found. Once candidates begin interviews, their metrics will appear here.")
     else:
-        completed = len(df[df["status"].str.lower().str.strip().isin(["completed", "accepted", "rejected", "interviewed"])])
-        pending = len(df[df["status"].str.lower().str.strip().isin(["pending", "interviewing", "in_progress"])])
-        avg_score = round(df["score"].mean(), 2)
+        completed = dashboard_stats.get("completed_interviews", len(df[df["status"].str.lower().str.strip().isin(["completed", "accepted", "rejected", "interviewed"])]))
+        pending = dashboard_stats.get("pending_interviews", 0) + dashboard_stats.get("in_progress_interviews", 0)
+        avg_score = dashboard_stats.get("average_score", round(df["score"].mean(), 2))
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.markdown(f"<div class='metric-card'><div class='metric-title'>Total Candidates</div><div class='metric-value'>{len(df)}</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card'><div class='metric-title'>Total Candidates</div><div class='metric-value'>{dashboard_stats.get('total_candidates', len(df))}</div></div>", unsafe_allow_html=True)
         with c2:
             st.markdown(f"<div class='metric-card'><div class='metric-title'>Completed</div><div class='metric-value'>{completed}</div></div>", unsafe_allow_html=True)
         with c3:
@@ -438,111 +461,214 @@ elif st.session_state.active_page == "reports":
             📄 Candidate Reports
         </h2>
         <p style='color:#8FA4BE; margin-bottom:28px; font-size:15px;'>
-            Generate and download individual candidate assessment reports.
+            Review live final evaluations, turn-by-turn evidence, and full interview chat logs.
         </p>
     """, unsafe_allow_html=True)
 
     if df.empty:
         st.warning("No candidate records available to generate reports.")
     else:
-        candidate_names = df["name"].tolist()
-        candidate = st.selectbox("Select Candidate", candidate_names)
+        candidate_options = {
+            f"{row['name']} - {row.get('email', 'no email')}": row["id"]
+            for _, row in df.sort_values("name").iterrows()
+        }
+        selected_label = st.selectbox("Select Candidate", list(candidate_options.keys()))
 
-        if candidate:
-            row = df[df["name"] == candidate].iloc[0]
-            email = row["email"]
-            position = row["position"]
-            status = row["status"]
-            score_value = row["score"]
-            progress_score = score_value / 100
+        if selected_label:
+            candidate_id = candidate_options[selected_label]
+            try:
+                bundle = api_get(f"/recruiter/candidates/{candidate_id}")
+            except Exception as exc:
+                st.error(f"Unable to load candidate report: {exc}")
+                st.stop()
+
+            candidate_data = bundle.get("candidate") or {}
+            report = bundle.get("report") or {}
+            session = bundle.get("session") or {}
+            profile = bundle.get("profile") or {}
+            turns = bundle.get("turns") or []
+            messages = bundle.get("messages") or []
+
+            name = candidate_data.get("name", "Unknown candidate")
+            email = candidate_data.get("email", "")
+            position = candidate_data.get("bootcamp", "Agentic AI")
+            status = candidate_data.get("status", "new")
+            score_value = float(candidate_data.get("score") or 0)
+            progress_score = min(max(score_value / 100, 0), 1)
+            recommendation = (report.get("recommendation") or candidate_data.get("recommendation") or "pending").upper()
 
             st.markdown(f"""
                 <h4 style='font-family:Outfit,sans-serif; color:#E8EDF3; font-weight:800; margin-top:24px; margin-bottom:16px;'>
-                    👤 {candidate}
+                    👤 {name}
                 </h4>
             """, unsafe_allow_html=True)
 
-            col1, col2, col3 = st.columns([2, 2, 1])
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
             with col1:
-                st.markdown(f"**📧 Email:** `{email}`")
-                st.markdown(f"**💼 Position:** {position}")
+                st.markdown(f"**📧 Email:** `{email or 'Not recorded'}`")
+                st.markdown(f"**💼 Program:** {position}")
+                st.markdown(f"**Session:** `{session.get('id', candidate_data.get('session_id') or 'No session')}`")
             with col2:
                 st.metric("Status", status)
-                st.metric("Score", f"{score_value}%")
             with col3:
-                if score_value >= 85:
-                    analysis = "Excellent performance. Strong alignment with bootcamp goals."
-                    st.success("Excellent ✨")
-                elif score_value >= 70:
-                    analysis = "Good performance. Competent skills, ready to grow."
-                    st.info("Very Good 👍")
-                else:
-                    analysis = "Needs improvement. Recommend additional prep."
-                    st.warning("Needs Improvement ⚠️")
+                st.metric("Score", f"{score_value:.1f}%")
+            with col4:
+                st.metric("Decision", recommendation)
 
             st.progress(progress_score)
-            st.caption(f"**Admissions Summary:** {analysis}")
             st.markdown("<hr style='border-color:rgba(143,164,190,0.1); margin:20px 0;'>", unsafe_allow_html=True)
 
-            # PDF Generator
-            class PDF(FPDF):
-                def header(self):
-                    self.set_fill_color(10, 22, 40)
-                    self.rect(0, 0, 210, 30, 'F')
-                    self.set_font("Arial", "B", 16)
-                    self.set_text_color(255, 255, 255)
-                    self.cell(0, 10, "CANDIDATE ASSESSMENT REPORT", align="C", ln=True)
-                    self.ln(10)
+            if not report:
+                st.warning("No final interview report exists yet for this candidate.")
+            else:
+                st.markdown("### Final Evaluation")
+                st.markdown(f"**Summary:** {report.get('summary') or 'Not recorded.'}")
 
-                def footer(self):
-                    self.set_y(-15)
-                    self.set_font("Arial", "I", 8)
-                    self.set_text_color(128, 128, 128)
-                    self.cell(0, 10, f"Page {self.page_no()}", align="C")
+                s_col, w_col = st.columns(2)
+                with s_col:
+                    st.markdown("#### Specific Strengths")
+                    st.info(report.get("strengths") or "Not recorded.")
+                with w_col:
+                    st.markdown("#### Specific Weaknesses")
+                    st.warning(report.get("weaknesses") or "Not recorded.")
 
-            def generate_pdf():
-                pdf = PDF()
-                pdf.add_page()
-                pdf.ln(15)
-                pdf.set_draw_color(220, 220, 220)
-                pdf.rect(10, 40, 190, 100)
-                pdf.set_text_color(50, 50, 50)
+                st.markdown("#### Decision Notes")
+                st.write(report.get("decision_notes") or "Not recorded.")
 
-                def add_info(label, value):
-                    pdf.set_font("Arial", "B", 11)
-                    pdf.cell(40, 10, f"{clean_for_pdf(label)}:", ln=False)
-                    pdf.set_font("Arial", "", 11)
-                    pdf.cell(0, 10, clean_for_pdf(value), ln=True)
-                    pdf.set_draw_color(240, 240, 240)
-                    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+                topic_scores = report.get("topic_scores") or {}
+                if isinstance(topic_scores, dict) and topic_scores.get("topic_scores"):
+                    score_rows = []
+                    for topic, info in topic_scores["topic_scores"].items():
+                        if isinstance(info, dict):
+                            score_rows.append({
+                                "topic": topic,
+                                "score": round(float(info.get("final_topic_score") or 0) * 20, 1),
+                                "turns": len(info.get("turn_scores") or []),
+                            })
+                    if score_rows:
+                        st.markdown("#### Topic Scores")
+                        st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
 
-                pdf.ln(2)
-                add_info("Full Name", candidate)
-                add_info("Email", email)
-                add_info("Position", position)
-                add_info("Status", status)
-                add_info("Final Score", f"{score_value}%")
+            st.markdown("<hr style='border-color:rgba(143,164,190,0.1); margin:24px 0;'>", unsafe_allow_html=True)
+            st.markdown("### Question-by-Question History")
+            if not turns:
+                st.info("No evaluated interview turns were recorded for this candidate.")
+            else:
+                for turn in turns:
+                    turn_title = f"Turn {turn.get('turn_number')} - {str(turn.get('topic') or 'topic').title()} - Score {turn.get('score', 'N/A')}/5"
+                    with st.expander(turn_title, expanded=False):
+                        st.markdown("**Question**")
+                        st.write(turn.get("question") or "Not recorded.")
+                        st.markdown("**Candidate Answer**")
+                        st.write(turn.get("answer") or "No answer recorded.")
+                        st.markdown("**Evaluator Feedback**")
+                        st.write(turn.get("feedback") or "No feedback recorded.")
+                        st.markdown(f"**Needs Probe:** {'Yes' if turn.get('needs_probe') else 'No'}")
+                        extracted_skills = turn.get("extracted_skills") or []
+                        extracted_info = turn.get("extracted_info") or {}
+                        if extracted_skills:
+                            st.markdown("**Extracted Skills**")
+                            st.write(", ".join(map(str, extracted_skills)))
+                        if extracted_info:
+                            st.markdown("**Extracted Info**")
+                            st.json(extracted_info)
 
-                pdf.ln(10)
-                pdf.set_font("Arial", "B", 12)
-                pdf.set_text_color(0, 201, 167)
-                pdf.cell(0, 10, "Evaluation & Analysis", ln=True)
+            st.markdown("<hr style='border-color:rgba(143,164,190,0.1); margin:24px 0;'>", unsafe_allow_html=True)
+            profile_tab, chat_tab = st.tabs(["Candidate Profile", "Full Chat Log"])
+            with profile_tab:
+                if profile:
+                    profile_view = {
+                        "background": profile.get("background"),
+                        "education": profile.get("education"),
+                        "experience": profile.get("experience"),
+                        "skills": profile.get("skills"),
+                        "projects": profile.get("projects"),
+                    }
+                    st.json(profile_view)
+                else:
+                    st.info("No structured profile has been recorded for this candidate.")
+            with chat_tab:
+                if messages:
+                    for message in messages:
+                        role = str(message.get("role") or "message").title()
+                        created = message.get("created_at") or ""
+                        st.markdown(f"**{role}** `{created}`")
+                        st.write(message.get("content") or "")
+                        st.markdown("---")
+                else:
+                    st.info("No chat messages were recorded for this session.")
 
-                pdf.set_fill_color(245, 247, 250)
-                pdf.set_text_color(60, 60, 60)
-                pdf.set_font("Arial", "I", 11)
-                pdf.multi_cell(0, 12, clean_for_pdf(f"Result: {analysis}\nThis report is automatically generated on {pd.Timestamp.now().strftime('%Y-%m-%d')}."), border=1, fill=True)
+            def generate_reportlab_pdf() -> bytes:
+                buffer = io.BytesIO()
+                doc = SimpleDocTemplate(
+                    buffer,
+                    pagesize=letter,
+                    rightMargin=0.6 * inch,
+                    leftMargin=0.6 * inch,
+                    topMargin=0.6 * inch,
+                    bottomMargin=0.6 * inch,
+                )
+                styles = getSampleStyleSheet()
+                styles.add(ParagraphStyle(name="SmallBody", parent=styles["BodyText"], fontSize=9, leading=12))
+                story = [
+                    Paragraph("Candidate Evaluation Snapshot", styles["Title"]),
+                    Paragraph(f"Generated on {pd.Timestamp.now().strftime('%Y-%m-%d')}", styles["SmallBody"]),
+                    Spacer(1, 0.15 * inch),
+                    Table(
+                        [
+                            ["Candidate", clean_for_pdf(name), "Score", f"{score_value:.1f}%"],
+                            ["Email", clean_for_pdf(email or "Not recorded"), "Decision", recommendation],
+                            ["Program", clean_for_pdf(position), "Status", clean_for_pdf(status)],
+                        ],
+                        colWidths=[1.0 * inch, 2.8 * inch, 0.9 * inch, 1.5 * inch],
+                    ),
+                    Spacer(1, 0.2 * inch),
+                    Paragraph("Final Evaluation", styles["Heading2"]),
+                    Paragraph(escape_for_paragraph(report.get("summary") or "No final summary recorded."), styles["BodyText"]),
+                    Paragraph("Strengths", styles["Heading3"]),
+                    Paragraph(escape_for_paragraph(report.get("strengths") or "Not recorded."), styles["BodyText"]),
+                    Paragraph("Weaknesses", styles["Heading3"]),
+                    Paragraph(escape_for_paragraph(report.get("weaknesses") or "Not recorded."), styles["BodyText"]),
+                    Paragraph("Decision Notes", styles["Heading3"]),
+                    Paragraph(escape_for_paragraph(report.get("decision_notes") or "Not recorded."), styles["BodyText"]),
+                    Spacer(1, 0.2 * inch),
+                    Paragraph("Question History", styles["Heading2"]),
+                ]
 
-                return pdf.output(dest="S").encode("latin-1")
+                for turn in turns:
+                    story.extend([
+                        Paragraph(
+                            escape_for_paragraph(f"Turn {turn.get('turn_number')} - {turn.get('topic')} - Score {turn.get('score', 'N/A')}/5"),
+                            styles["Heading3"],
+                        ),
+                        Paragraph(escape_for_paragraph(f"Question: {turn.get('question') or 'Not recorded.'}"), styles["SmallBody"]),
+                        Paragraph(escape_for_paragraph(f"Answer: {turn.get('answer') or 'Not recorded.'}"), styles["SmallBody"]),
+                        Paragraph(escape_for_paragraph(f"Feedback: {turn.get('feedback') or 'Not recorded.'}"), styles["SmallBody"]),
+                        Spacer(1, 0.08 * inch),
+                    ])
+
+                for item in story:
+                    if isinstance(item, Table):
+                        item.setStyle(TableStyle([
+                            ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
+                            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("PADDING", (0, 0), (-1, -1), 6),
+                        ]))
+
+                doc.build(story)
+                return buffer.getvalue()
 
             try:
-                pdf_data = generate_pdf()
                 st.download_button(
-                    "📄 Download Professional PDF Report",
-                    data=pdf_data,
-                    file_name=f"{candidate.replace(' ', '_')}_Assessment_Report.pdf",
+                    "📄 Download Evaluation Snapshot PDF",
+                    data=generate_reportlab_pdf(),
+                    file_name=f"{name.replace(' ', '_')}_evaluation_snapshot.pdf",
                     mime="application/pdf",
-                    use_container_width=True
+                    use_container_width=True,
+                    disabled=not report,
                 )
             except Exception as pdf_err:
                 st.error(f"Error generating PDF report: {pdf_err}")
