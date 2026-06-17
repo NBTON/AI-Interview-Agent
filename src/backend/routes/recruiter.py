@@ -1,89 +1,23 @@
-"""
-Recruiter Routes - Mock Data Only
-"""
-from fastapi import APIRouter, HTTPException, Depends
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
-import os
+
+from backend.db import get_candidate_reports_map, get_supabase, public_candidate, score_to_frontend
 
 router = APIRouter(prefix="/recruiter", tags=["Recruiter"])
 
-# ============================================
-# MOCK DATA
-# ============================================
-# Mock candidates data (same as candidates.py for consistency)
-mock_candidates = {
-    1: {
-        "id": 1,
-        "name": "Ahmed Al-Rashidi",
-        "email": "ahmed@example.com",
-        "bootcamp": "Agentic AI",
-        "status": "completed",
-        "overall_score": 85,
-        "completed_at": "2024-01-20T15:30:00"
-    },
-    2: {
-        "id": 2,
-        "name": "Sarah Johnson",
-        "email": "sarah@example.com",
-        "bootcamp": "Data Science",
-        "status": "in_progress",
-        "overall_score": None,
-        "completed_at": None
-    },
-    3: {
-        "id": 3,
-        "name": "Carlos Mendez",
-        "email": "carlos@example.com",
-        "bootcamp": "Web Development",
-        "status": "completed",
-        "overall_score": 72,
-        "completed_at": "2024-01-19T11:45:00"
-    },
-    4: {
-        "id": 4,
-        "name": "Emma Watson",
-        "email": "emma@example.com",
-        "bootcamp": "Agentic AI",
-        "status": "pending",
-        "overall_score": None,
-        "completed_at": None
-    }
-}
 
-# Mock interview sessions
-mock_sessions = {
-    "session-1": {
-        "candidate_id": 1,
-        "status": "completed",
-        "score": 85,
-        "completed_at": "2024-01-20T15:30:00"
-    },
-    "session-2": {
-        "candidate_id": 2,
-        "status": "in_progress",
-        "score": None,
-        "completed_at": None
-    },
-    "session-3": {
-        "candidate_id": 3,
-        "status": "completed",
-        "score": 72,
-        "completed_at": "2024-01-19T11:45:00"
-    }
-}
-
-# ============================================
-# PYDANTIC MODELS
-# ============================================
 class RecruiterLoginRequest(BaseModel):
     username: str
     password: str
+
 
 class RecruiterLoginResponse(BaseModel):
     success: bool
     message: str
     token: Optional[str] = None
+
 
 class DashboardStats(BaseModel):
     total_candidates: int
@@ -93,103 +27,168 @@ class DashboardStats(BaseModel):
     average_score: float
     acceptance_rate: float
 
+
 class CandidateSummary(BaseModel):
-    id: int
+    id: Any
     name: str
     email: str
-    bootcamp: str
+    bootcamp: Optional[str] = "Agentic AI"
     status: str
-    score: Optional[int] = None
+    score: Optional[float] = None
     completed_at: Optional[str] = None
 
-# ============================================
-# ROUTES
-# ============================================
-# NOTE: Recruiter login is handled by auth.py (/api/recruiter/login)
-# to avoid duplicate route registration.
+
+class SessionDetail(BaseModel):
+    candidate_id: Any
+    status: str
+    score: Optional[float] = None
+    completed_at: Optional[str] = None
+    ai_analysis: Optional[str] = None
+    decision_notes: Optional[str] = None
+    strengths: Optional[List[str]] = []
+    weaknesses: Optional[List[str]] = []
+    turns: Optional[List[dict]] = []
+
+
+def _fetch_candidates() -> List[Dict[str, Any]]:
+    supabase = get_supabase()
+    try:
+        res = supabase.table("candidates").select("*").order("created_at", desc=True).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    reports_map = get_candidate_reports_map()
+    return [public_candidate(row, reports_map.get(row.get("id"))) for row in res.data or []]
+
+
+def _fetch_session(candidate_id: str) -> Dict[str, Any]:
+    supabase = get_supabase()
+    try:
+        report_res = (
+            supabase.table("interview_reports")
+            .select("*")
+            .eq("candidate_id", candidate_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error (report): {e}")
+
+    report = (report_res.data or [None])[0]
+    if not report:
+        raise HTTPException(status_code=404, detail="No interview report found for this candidate.")
+
+    turns = []
+    session_id = report.get("session_id")
+    if session_id:
+        try:
+            turns_res = (
+                supabase.table("interview_turns")
+                .select("*")
+                .eq("session_id", session_id)
+                .order("turn_number", desc=False)
+                .execute()
+            )
+            raw_turns = turns_res.data or []
+        except Exception:
+            raw_turns = []
+
+        for t in raw_turns:
+            turns.append(
+                {
+                    "question": t.get("question", t.get("agent_message", "")),
+                    "answer": t.get("answer", t.get("candidate_message", "")),
+                    "topic": t.get("topic", ""),
+                    "score": t.get("score"),
+                    "feedback": t.get("feedback", t.get("comment", "")),
+                }
+            )
+
+    def to_list(value):
+        if not value:
+            return []
+        if isinstance(value, list):
+            return [str(v) for v in value if str(v).strip()]
+        return [s.strip() for s in str(value).split(",") if s.strip()]
+
+    return {
+        "candidate_id": candidate_id,
+        "session_id": session_id,
+        "status": report.get("status", "completed"),
+        "score": score_to_frontend(report.get("overall_score") or report.get("score")),
+        "completed_at": report.get("completed_at") or report.get("updated_at"),
+        "ai_analysis": report.get("ai_analysis") or report.get("summary") or "",
+        "decision_notes": report.get("decision_notes") or report.get("notes") or report.get("recommendation") or "",
+        "strengths": to_list(report.get("strengths")),
+        "weaknesses": to_list(report.get("weaknesses")),
+        "turns": turns,
+    }
 
 
 @router.get("/dashboard", response_model=DashboardStats)
 def get_dashboard_stats():
-    """Get recruiter dashboard statistics"""
-    candidates_list = list(mock_candidates.values())
-    
-    total = len(candidates_list)
-    completed = len([c for c in candidates_list if c["status"] == "completed"])
-    in_progress = len([c for c in candidates_list if c["status"] == "in_progress"])
-    pending = len([c for c in candidates_list if c["status"] == "pending"])
-    
-    # Calculate average score from completed interviews
-    scores = [c["overall_score"] for c in candidates_list if c["overall_score"] is not None]
-    avg_score = sum(scores) / len(scores) if scores else 0
-    
-    # Mock acceptance rate (candidates with score >= 70)
-    accepted = len([c for c in candidates_list if c.get("overall_score", 0) >= 70])
-    acceptance_rate = (accepted / completed * 100) if completed > 0 else 0
-    
+    candidates = _fetch_candidates()
+    total = len(candidates)
+    completed = sum(1 for c in candidates if c["status"].lower() in {"completed", "accepted", "rejected", "interviewed"})
+    in_progress = sum(1 for c in candidates if c["status"].lower() in {"in progress", "interviewing"})
+    pending = sum(1 for c in candidates if c["status"].lower() in {"pending", "new", "not started"})
+    scores = [float(c.get("score") or 0) for c in candidates]
+    accepted = sum(1 for score in scores if score >= 70)
+
     return DashboardStats(
         total_candidates=total,
         completed_interviews=completed,
         pending_interviews=pending,
         in_progress_interviews=in_progress,
-        average_score=round(avg_score, 1),
-        acceptance_rate=round(acceptance_rate, 1)
+        average_score=round(sum(scores) / len(scores), 1) if scores else 0.0,
+        acceptance_rate=round(accepted / completed * 100, 1) if completed else 0.0,
     )
+
 
 @router.get("/candidates", response_model=List[CandidateSummary])
 def get_all_candidates():
-    """Get all candidates with their interview status"""
-    candidates_list = list(mock_candidates.values())
-    
     return [
         CandidateSummary(
             id=c["id"],
             name=c["name"],
             email=c["email"],
-            bootcamp=c["bootcamp"],
-            status=c["status"],
-            score=c.get("overall_score"),
-            completed_at=c.get("completed_at")
+            bootcamp=c.get("position") or c.get("bootcamp") or "Agentic AI",
+            status=c.get("status") or "Pending",
+            score=c.get("score"),
+            completed_at=c.get("completed_at"),
         )
-        for c in candidates_list
+        for c in _fetch_candidates()
     ]
 
+
 @router.get("/candidates/{candidate_id}", response_model=CandidateSummary)
-def get_candidate_details(candidate_id: int):
-    """Get detailed information about a specific candidate"""
-    if candidate_id not in mock_candidates:
+def get_candidate_details(candidate_id: str):
+    candidates = [c for c in _fetch_candidates() if str(c["id"]) == candidate_id]
+    if not candidates:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    c = mock_candidates[candidate_id]
-    
+    c = candidates[0]
     return CandidateSummary(
         id=c["id"],
         name=c["name"],
         email=c["email"],
-        bootcamp=c["bootcamp"],
-        status=c["status"],
-        score=c.get("overall_score"),
-        completed_at=c.get("completed_at")
+        bootcamp=c.get("position") or c.get("bootcamp") or "Agentic AI",
+        status=c.get("status") or "Pending",
+        score=c.get("score"),
+        completed_at=c.get("completed_at"),
     )
+
 
 @router.get("/sessions")
 def get_all_sessions():
-    """Get all interview sessions"""
-    return list(mock_sessions.values())
+    supabase = get_supabase()
+    try:
+        res = supabase.table("interview_reports").select("*").order("created_at", desc=True).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    return res.data or []
 
-@router.get("/sessions/{session_id}")
-def get_session_details(session_id: str):
-    """Get detailed session information"""
-    if session_id not in mock_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = mock_sessions[session_id]
-    candidate = mock_candidates.get(session["candidate_id"])
-    
-    return {
-        "session_id": session_id,
-        "candidate": candidate,
-        "status": session["status"],
-        "score": session.get("score"),
-        "completed_at": session.get("completed_at")
-    }
+
+@router.get("/sessions/{candidate_id}", response_model=SessionDetail)
+def get_session_by_candidate(candidate_id: str):
+    return _fetch_session(candidate_id)

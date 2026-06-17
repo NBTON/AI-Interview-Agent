@@ -148,32 +148,41 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
     """Ensures candidate, session, and profile exist in Supabase and returns verified UUIDs."""
     raw_candidate_id = candidate_id
 
-    # Convert string ID to valid UUID format using uuid5 for consistency
     try:
         candidate_uuid = str(uuid.UUID(candidate_id))
+        is_uuid = True
     except ValueError:
-        # Create deterministic UUID from string representation
         candidate_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"candidate.{candidate_id}"))
+        is_uuid = False
 
     session_uuid = str(uuid.uuid4())
-    
-    # Resolve program ID
+
     prog_uuid = program_id
     if not prog_uuid:
         prog = get_program_requirements()
         prog_uuid = prog.get("id")
-        
+
     try:
         if _db_client:
-            # 1. Upsert candidate
+            if is_uuid:
+                res = _db_client.table("candidates").select("*").eq("id", candidate_uuid).limit(1).execute()
+                existing = res.data[0] if res.data else None
+                full_name = candidate_name
+                email = f"{candidate_name.lower().replace(' ', '')}@example.com"
+                if existing:
+                    full_name = existing.get("full_name") or existing.get("name") or candidate_name
+                    email = existing.get("email") or email
+            else:
+                full_name = candidate_name
+                email = raw_candidate_id if "@" in raw_candidate_id else f"{candidate_name.lower().replace(' ', '')}@example.com"
+
             _db_client.table("candidates").upsert({
                 "id": candidate_uuid,
-                "full_name": candidate_name,
-                "email": raw_candidate_id if "@" in raw_candidate_id else f"{candidate_name.lower().replace(' ', '')}@example.com",
+                "full_name": full_name,
+                "email": email,
                 "status": "interviewing"
             }).execute()
-            
-            # 2. Insert interview session
+
             _db_client.table("interview_sessions").insert({
                 "id": session_uuid,
                 "candidate_id": candidate_uuid,
@@ -185,8 +194,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
                 "turn_count": 0,
                 "scores": {}
             }).execute()
-            
-            # 3. Create profile shell if not exists
+
             _db_client.table("candidate_profiles").upsert({
                 "candidate_id": candidate_uuid,
                 "background": {},
@@ -195,11 +203,11 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
                 "skills": {"technical": [], "soft": [], "proficiency": {}},
                 "projects": []
             }).execute()
-            
+
             print(f"Initialized database session: {session_uuid} for candidate: {candidate_uuid}")
     except Exception as e:
         print(f"Error ensuring candidate and session in database: {e}")
-        
+
     return {
         "candidate_id": candidate_uuid,
         "session_id": session_uuid,
