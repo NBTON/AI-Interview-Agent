@@ -189,6 +189,7 @@ with col2:
                         st.success(data["message"])
                         st.session_state["candidate_name"] = data["name"]
                         st.session_state["candidate_email"] = email
+                        st.session_state["candidate_token"] = data.get("candidate_token")
                         st.switch_page("pages/Interview.py")
                     else:
                         st.error(response.json().get("detail", "Email not found"))

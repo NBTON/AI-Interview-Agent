@@ -1,5 +1,4 @@
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from state import InterviewState
 from nodes import (
     node_init,
@@ -9,6 +8,36 @@ from nodes import (
     node_interviewer,
     node_wrap_up
 )
+from db import get_postgres_dsn
+
+_postgres_conn = None
+_postgres_checkpointer = None
+
+
+def _build_checkpointer():
+    """Use persistent PostgreSQL checkpoints when configured."""
+    global _postgres_conn, _postgres_checkpointer
+
+    dsn = get_postgres_dsn()
+    if not dsn:
+        raise RuntimeError(
+            "Persistent checkpointing is required. Set SUPABASE_DB_URL, DATABASE_URL, POSTGRES_URL, "
+            "or SUPABASE_DB_PASSWORD with SUPABASE_URL."
+        )
+
+    from langgraph.checkpoint.postgres import PostgresSaver
+    import psycopg
+    from psycopg.rows import dict_row
+
+    _postgres_conn = psycopg.connect(
+        dsn,
+        autocommit=True,
+        row_factory=dict_row,
+        prepare_threshold=None,
+    )
+    _postgres_checkpointer = PostgresSaver(_postgres_conn)
+    _postgres_checkpointer.setup()
+    return _postgres_checkpointer
 
 def node_router_pass_through(state: InterviewState) -> dict:
     """Pass-through node to serve as a source for conditional routing."""
@@ -47,10 +76,10 @@ def build_graph():
     # wrap_up completes the interview
     builder.add_edge("wrap_up", END)
 
-    memory = MemorySaver()
+    checkpointer = _build_checkpointer()
     
     # Compile the graph with an interrupt before the evaluation node to capture candidate response
     return builder.compile(
-        checkpointer=memory,
+        checkpointer=checkpointer,
         interrupt_before=["evaluation"]
     )

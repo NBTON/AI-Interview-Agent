@@ -24,21 +24,21 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict
-from datetime import datetime
+from typing import List, Optional
 import uuid
 import concurrent.futures
 import json
 
 from agent.graph import build_graph
+from agent.db import get_supabase_client
+from backend.security import verify_candidate_token
 
 router = APIRouter(tags=["Interview"])
 
 # Compile the LangGraph instance
-graph = build_graph()
-
-# Store session metadata (in-memory)
-interview_sessions: Dict[str, dict] = {}
+_graph = None
+_graph_error = None
+_db_client = get_supabase_client()
 
 DEFAULT_MIN_QUESTIONS = 10
 DEFAULT_MAX_QUESTIONS = 30
@@ -89,6 +89,7 @@ def _parse_structured_question(raw_question: Optional[str]) -> tuple[str, str, O
 class StartInterviewRequest(BaseModel):
     candidate_name: str
     candidate_email: str
+    candidate_token: str
 
 class StartInterviewResponse(BaseModel):
     session_id: str
@@ -119,9 +120,90 @@ class SubmitAnswerResponse(BaseModel):
     feedback: Optional[str] = None
     final_score: Optional[float] = None
 
+
+def _require_db_client():
+    if not _db_client:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+    return _db_client
+
+
+def _fetch_session(session_id: str) -> dict:
+    db = _require_db_client()
+    try:
+        res = db.table("interview_sessions").select("*").eq("id", session_id).limit(1).execute()
+    except Exception as exc:
+        print(f"Error fetching interview session from Supabase: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load session")
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return res.data[0]
+
+
+def _fetch_candidate(candidate_id: str) -> dict:
+    db = _require_db_client()
+    try:
+        res = db.table("candidates").select("*").eq("id", candidate_id).limit(1).execute()
+    except Exception as exc:
+        print(f"Error fetching candidate from Supabase: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load candidate")
+    return res.data[0] if res.data else {}
+
+
+def _fetch_turns(session_id: str) -> list[dict]:
+    db = _require_db_client()
+    try:
+        res = db.table("interview_turns").select("*").eq("session_id", session_id).order("turn_number").execute()
+        return res.data or []
+    except Exception as exc:
+        print(f"Error fetching interview turns from Supabase: {exc}")
+        return []
+
+
+def _fetch_messages(session_id: str) -> list[dict]:
+    db = _require_db_client()
+    try:
+        res = db.table("conversation_messages").select("*").eq("session_id", session_id).order("created_at").execute()
+        return res.data or []
+    except Exception as exc:
+        print(f"Error fetching conversation messages from Supabase: {exc}")
+        return []
+
+
+def _fetch_final_score(session_id: str) -> Optional[float]:
+    db = _require_db_client()
+    try:
+        res = db.table("interview_reports").select("overall_score").eq("session_id", session_id).limit(1).execute()
+        if res.data and res.data[0].get("overall_score") is not None:
+            return float(res.data[0]["overall_score"]) * 20.0
+    except Exception as exc:
+        print(f"Error fetching final score from Supabase: {exc}")
+    return None
+
+
+def _get_graph():
+    global _graph, _graph_error
+    if _graph:
+        return _graph
+    try:
+        _graph = build_graph()
+        _graph_error = None
+        return _graph
+    except Exception as exc:
+        _graph_error = exc
+        print(f"Error initializing persistent LangGraph checkpointer: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Persistent interview state is not configured. Set SUPABASE_DB_URL, DATABASE_URL, "
+                "POSTGRES_URL, or SUPABASE_DB_PASSWORD with SUPABASE_URL."
+            ),
+        )
+
 @router.post("/interview/start", response_model=StartInterviewResponse)
 def start_interview(request: StartInterviewRequest):
     """Start a new interview session - running the LangGraph agent"""
+    verify_candidate_token(request.candidate_token, request.candidate_email)
+
     session_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": session_id}}
     
@@ -150,6 +232,7 @@ def start_interview(request: StartInterviewRequest):
     }
     
     try:
+        graph = _get_graph()
         # Run graph with timeout to prevent hanging on slow LLM responses
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(graph.invoke, initial_state, config)
@@ -162,15 +245,6 @@ def start_interview(request: StartInterviewRequest):
         
         q_text, q_type, options, initial_code = _parse_structured_question(first_question_raw)
 
-        # Store in-memory metadata for compatibility
-        interview_sessions[session_id] = {
-            "candidate_name": request.candidate_name,
-            "candidate_email": request.candidate_email,
-            "started_at": datetime.now().isoformat(),
-            "completed": False,
-            "answers": []
-        }
-        
         return StartInterviewResponse(
             session_id=session_id,
             candidate_name=request.candidate_name,
@@ -192,14 +266,16 @@ def start_interview(request: StartInterviewRequest):
 def submit_answer(request: SubmitAnswerRequest):
     """Submit an answer and resume the LangGraph execution to get evaluation and next question"""
     session_id = request.session_id
-    if session_id not in interview_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    _fetch_session(session_id)
         
     config = {"configurable": {"thread_id": session_id}}
     
     try:
+        graph = _get_graph()
         # Get current state to know which question was asked
         state = graph.get_state(config)
+        if not state or not state.values:
+            raise HTTPException(status_code=404, detail="State not found for session")
         last_question = state.values.get("last_question") if state and state.values else ""
         
         # Update state with the candidate's answer
@@ -228,16 +304,6 @@ def submit_answer(request: SubmitAnswerRequest):
             
         turn_percentage = (last_score_val / 5.0) * 100
         
-        # Store in in-memory session metadata
-        interview_sessions[session_id]["answers"].append({
-            "question": last_question,
-            "answer": request.answer,
-            "score": last_score_val,
-            "percentage": turn_percentage,
-            "feedback": feedback,
-            "timestamp": datetime.now().isoformat()
-        })
-        
         # Next question
         next_question_raw = result.get("last_question") if not is_complete else None
         q_number = result.get("turn_count", 0) + 1
@@ -249,10 +315,6 @@ def submit_answer(request: SubmitAnswerRequest):
             report = result.get("final_report", {})
             final_score_raw = report.get("overall_score", 3.0) if report else 3.0
             final_score = (final_score_raw / 5.0) * 100
-            
-            interview_sessions[session_id]["completed"] = True
-            interview_sessions[session_id]["completed_at"] = datetime.now().isoformat()
-            interview_sessions[session_id]["final_score"] = final_score
             
             # Sync candidate score to Excel
             try:
@@ -284,53 +346,76 @@ def submit_answer(request: SubmitAnswerRequest):
 
 @router.get("/interview/session/{session_id}")
 def get_session_status(session_id: str):
-    """Get current session status from LangGraph state"""
-    if session_id not in interview_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    """Get current session status from Supabase rows and PostgreSQL checkpoint state."""
+    session = _fetch_session(session_id)
+    candidate = _fetch_candidate(session["candidate_id"])
+    turns = _fetch_turns(session_id)
+    messages = _fetch_messages(session_id)
         
     config = {"configurable": {"thread_id": session_id}}
+    graph = _get_graph()
     state = graph.get_state(config)
     
     if not state or not state.values:
         raise HTTPException(status_code=404, detail="State not found for session")
         
     values = state.values
-    scores = values.get("scores", {})
+    scores = session.get("scores") or values.get("scores", {})
     avg_score = 0.0
     if scores:
         avg_score = (sum(scores.values()) / len(scores) / 5.0) * 100
         
-    final_score = None
-    if values.get("is_complete"):
-        report = values.get("final_report", {})
-        final_score_raw = report.get("overall_score", 3.0) if report else 3.0
-        final_score = (final_score_raw / 5.0) * 100
+    final_score = _fetch_final_score(session_id)
         
     return {
         "session_id": session_id,
-        "candidate_name": values.get("candidate_name"),
-        "completed": values.get("is_complete", False),
-        "current_topic": values.get("current_topic", ""),
-        "question_number": values.get("turn_count", 0) + 1,
+        "candidate_name": candidate.get("full_name") or values.get("candidate_name"),
+        "candidate_email": candidate.get("email"),
+        "completed": session.get("status") == "completed",
+        "current_topic": session.get("current_topic") or values.get("current_topic", ""),
+        "question_number": int(session.get("turn_count") or values.get("turn_count", 0)) + 1,
         "total_questions": _question_limit(),
-        "answers_so_far": len(values.get("answers", [])),
+        "answers_so_far": len(turns),
         "average_score": avg_score,
-        "final_score": final_score
+        "final_score": final_score,
+        "turns": turns,
+        "messages": messages
     }
 
 @router.get("/interview/history/{candidate_name}")
 def get_candidate_interview_history(candidate_name: str):
-    """Get interview history for a candidate"""
+    """Get interview history for a candidate from Supabase."""
+    db = _require_db_client()
     history = []
-    for session_id, session in interview_sessions.items():
-        if session["candidate_name"] == candidate_name:
-            history.append({
-                "session_id": session_id,
-                "completed": session["completed"],
-                "completed_at": session.get("completed_at"),
-                "final_score": session.get("final_score"),
-                "total_answers": len(session.get("answers", [])),
-                "answers": session.get("answers", [])
-            })
+
+    try:
+        candidate_res = db.table("candidates").select("*").eq("full_name", candidate_name).limit(1).execute()
+        if not candidate_res.data:
+            return {"candidate_name": candidate_name, "sessions": []}
+
+        candidate = candidate_res.data[0]
+        sessions_res = (
+            db.table("interview_sessions")
+            .select("*")
+            .eq("candidate_id", candidate["id"])
+            .order("started_at", desc=True)
+            .execute()
+        )
+    except Exception as exc:
+        print(f"Error loading candidate interview history from Supabase: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to load candidate history")
+
+    for session in sessions_res.data or []:
+        session_id = session["id"]
+        turns = _fetch_turns(session_id)
+        history.append({
+            "session_id": session_id,
+            "completed": session.get("status") == "completed",
+            "completed_at": session.get("ended_at"),
+            "final_score": _fetch_final_score(session_id),
+            "total_answers": len(turns),
+            "answers": turns,
+            "messages": _fetch_messages(session_id),
+        })
             
     return {"candidate_name": candidate_name, "sessions": history}

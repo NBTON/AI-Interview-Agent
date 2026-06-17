@@ -161,7 +161,7 @@ with col2:
         </div>
     """, unsafe_allow_html=True)
 
-    email = st.text_input("Email", placeholder="e.g. admin@example.com")
+    email = st.text_input("Email", placeholder="e.g. recruiter@example.com")
     password = st.text_input("Password", type="password", placeholder="Enter your password")
 
     btn_col1, btn_col2 = st.columns([1, 1])

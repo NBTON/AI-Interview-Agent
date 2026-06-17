@@ -318,7 +318,8 @@ if "session_id" not in st.session_state:
     try:
         response = requests.post(f"{API_URL}/interview/start", json={
             "candidate_name": st.session_state["candidate_name"],
-            "candidate_email": st.session_state.get("candidate_email", "candidate@example.com")
+            "candidate_email": st.session_state.get("candidate_email", "candidate@example.com"),
+            "candidate_token": st.session_state.get("candidate_token")
         }, timeout=API_TIMEOUT)
         if response.status_code == 200:
             data = response.json()
