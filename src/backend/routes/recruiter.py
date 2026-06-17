@@ -124,7 +124,7 @@ def get_dashboard_stats():
     avg_score = sum(scores) / len(scores) if scores else 0
     
     # Mock acceptance rate (candidates with score >= 70)
-    accepted = len([c for c in candidates_list if c.get("overall_score", 0) >= 70])
+    accepted = len([c for c in candidates_list if c.get("overall_score") is not None and c.get("overall_score", 0) >= 70])
     acceptance_rate = (accepted / completed * 100) if completed > 0 else 0
     
     return DashboardStats(

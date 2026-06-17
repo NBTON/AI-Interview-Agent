@@ -14,4 +14,9 @@ env/
 .mcp.json
 skills-lock.json
 
+# Test reports and generated HTML artifacts
+/tests/reports/
+/tests/reports/**/*.html
+/tests/reports/**/
+.coverage
 
