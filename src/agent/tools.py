@@ -1,5 +1,8 @@
 import os
 import uuid
+import sys
+import io
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -144,11 +147,12 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
 
     session_uuid = session_id or str(uuid.uuid4())
     
-    # Resolve program ID
+    # Resolve program ID and get program requirements dynamically
+    prog = get_program_requirements()
     prog_uuid = program_id
     if not prog_uuid:
-        prog = get_program_requirements()
         prog_uuid = prog.get("id")
+    required_topics = prog.get("required_topics", ["background", "education", "experience", "skills", "projects"])
         
     try:
         if _db_client:
@@ -168,9 +172,12 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
                 "status": "in_progress",
                 "current_topic": "",
                 "topics_covered": [],
-                "missing_topics": ["background", "education", "experience", "skills", "projects"],
+                "missing_topics": required_topics,
                 "turn_count": 0,
-                "scores": {}
+                "scores": {
+                    "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
+                    "topic_scores": {}
+                }
             }).execute()
             
             # 3. Create profile shell if not exists
@@ -224,6 +231,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         f"- 'type': The type of the question. Valid values: " + ", ".join([f"'{t}'" for t in allowed_types]) + ".\n"
         "- 'text': The question text/description. For 'coding', it is the programming problem description.\n"
         "- 'options': A list of 4 options (for multiple_choice), ['True', 'False'] (for true_false). For others, it must be null.\n"
+        "- 'correct_answer': The correct option text or value (for multiple_choice and true_false). For others, it must be null.\n"
         "- 'initial_code': A Python template code snippet to be completed, debugged, or extended (for coding). For others, it must be null.\n"
         "- 'solution_test': A brief description of the expected output or test case (for coding). For others, it must be null."
     )
@@ -232,7 +240,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
 
     # Adaptive questioning: determine technical difficulty level from context
     scores = context.get("scores", {})
-    bg_score = scores.get("background")
+    bg_score = scores.get("topic_scores", {}).get("background", {}).get("final_topic_score")
     is_experienced = bg_score is not None and bg_score >= 4
     
     if is_experienced:
@@ -268,18 +276,19 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "type": "multiple_choice",
                     "text": "Which background best matches your current preparation for an AI software bootcamp?",
                     "options": ["A) No programming exposure", "B) Basic Python or scripting experience", "C) Built several software or data projects", "D) Professional software or AI engineering experience"],
+                    "correct_answer": "B) Basic Python or scripting experience",
                     "initial_code": None,
                     "solution_test": None
                 })
             if stype == "true_false":
-                return json.dumps({"type": "true_false", "text": "True or False: Prior hands-on project work is useful preparation for an intensive AI bootcamp.", "options": ["True", "False"], "initial_code": None, "solution_test": None})
-            return json.dumps({"type": "open_ended", "text": "Tell me about your background in software development and AI.", "options": None, "initial_code": None, "solution_test": None})
+                return json.dumps({"type": "true_false", "text": "True or False: Prior hands-on project work is useful preparation for an intensive AI bootcamp.", "options": ["True", "False"], "correct_answer": "True", "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Tell me about your background in software development and AI.", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "education":
-            return json.dumps({"type": "open_ended", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "experience":
-            return json.dumps({"type": "open_ended", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "projects":
-            return json.dumps({"type": "open_ended", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "initial_code": None, "solution_test": None})
+            return json.dumps({"type": "open_ended", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         else: # skills
             stype = random.choice(["open_ended", "coding", "multiple_choice", "true_false"])
             if stype == "coding":
@@ -287,6 +296,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "type": "coding",
                     "text": "Complete the Python function `find_primes(n)` that returns a list of all prime numbers up to n.",
                     "options": None,
+                    "correct_answer": None,
                     "initial_code": "def find_primes(n):\n    # Write your code here\n    pass",
                     "solution_test": "find_primes(10) == [2, 3, 5, 7]"
                 })
@@ -295,6 +305,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "type": "multiple_choice",
                     "text": "Which of the following database query techniques retrieves data fastest for large tables?",
                     "options": ["A) Table scan", "B) Index scan/seek", "C) Nested loop join", "D) Full text search"],
+                    "correct_answer": "B) Index scan/seek",
                     "initial_code": None,
                     "solution_test": None
                 })
@@ -303,6 +314,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "type": "true_false",
                     "text": "Python's standard library `multiprocessing` allows true parallel thread execution on multi-core systems by bypassing the Global Interpreter Lock (GIL). True or False?",
                     "options": ["True", "False"],
+                    "correct_answer": "True",
                     "initial_code": None,
                     "solution_test": None
                 })
@@ -311,6 +323,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                     "type": "open_ended",
                     "text": "Explain how you would use Python to load a dataset, clean missing values, and train a simple machine learning model.",
                     "options": None,
+                    "correct_answer": None,
                     "initial_code": None,
                     "solution_test": None
                 })
@@ -385,6 +398,122 @@ def generate_probe_question(topic: str, last_question: str, last_answer: str) ->
     })
 
 
+def evaluate_objective_answer(question_obj: dict, user_answer: str) -> dict:
+    """
+    Evaluates Multiple Choice (MCQ) and True/False questions locally and deterministically.
+    """
+    correct_ans = question_obj.get("correct_answer")
+    if not correct_ans:
+        correct_ans = ""
+        
+    user_clean = str(user_answer).strip().lower()
+    correct_clean = str(correct_ans).strip().lower()
+    
+    # Strict matching heuristics:
+    is_correct = False
+    if user_clean == correct_clean:
+        is_correct = True
+    elif len(user_clean) == 1 and correct_clean.startswith(user_clean):
+        # User typed letter option e.g., 'a' for 'A) No programming exposure'
+        is_correct = True
+    elif user_clean in correct_clean or correct_clean in user_clean:
+        is_correct = True
+    elif correct_clean.startswith(user_clean + ")") or correct_clean.startswith(user_clean + "."):
+        is_correct = True
+        
+    score = 5 if is_correct else 1
+    feedback = (
+        f"Correct! The expected answer was '{correct_ans}' and your answer '{user_answer}' is correct."
+        if is_correct else
+        f"Incorrect. The expected answer was '{correct_ans}', but you answered '{user_answer}'."
+    )
+    
+    return {
+        "score": score,
+        "feedback": feedback,
+        "needs_probe": False,
+        "extracted_skills": [],
+        "extracted_info": {}
+    }
+
+
+def execute_and_test_code(submitted_code: str, test_case_script: str) -> dict:
+    """
+    Executes raw Python code submissions in an isolated namespace and runs assertions.
+    """
+    import sys
+    import io
+    
+    # Capturing stdout safely
+    old_stdout = sys.stdout
+    redirected_output = io.StringIO()
+    sys.stdout = redirected_output
+    
+    local_namespace = {}
+    
+    # Preprocess test case script to ensure expressions are assertions
+    test_lines = []
+    if test_case_script:
+        for line in test_case_script.strip().splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            if (not line_str.startswith("assert") 
+                and not line_str.startswith("def ") 
+                and not line_str.startswith("class ") 
+                and ("==" in line_str or ">" in line_str or "<" in line_str or "is" in line_str)):
+                test_lines.append(f"assert {line_str}")
+            else:
+                test_lines.append(line_str)
+    
+    combined_test_script = "\n".join(test_lines)
+    full_code = f"{submitted_code}\n\n{combined_test_script}"
+    
+    try:
+        # Run combined script in isolated namespace using exec
+        exec(full_code, {}, local_namespace)
+        
+        # Restore stdout
+        sys.stdout = old_stdout
+        output_captured = redirected_output.getvalue()
+        
+        return {
+            "success": True,
+            "score": 5,
+            "feedback": f"Your code executed and passed all tests successfully!\nExecution output:\n{output_captured}",
+            "needs_probe": False,
+            "extracted_skills": ["Python"],
+            "extracted_info": {}
+        }
+    except AssertionError as ae:
+        # Restore stdout
+        sys.stdout = old_stdout
+        output_captured = redirected_output.getvalue()
+        return {
+            "success": False,
+            "score": 3,
+            "feedback": f"Code executed but failed logical assertions.\nError: {ae}\nExecution output:\n{output_captured}",
+            "needs_probe": False,
+            "extracted_skills": ["Python"],
+            "extracted_info": {}
+        }
+    except Exception as e:
+        # Restore stdout
+        sys.stdout = old_stdout
+        output_captured = redirected_output.getvalue()
+        return {
+            "success": False,
+            "score": 2,
+            "feedback": f"Code execution failed due to syntax or runtime error.\nError: {type(e).__name__}: {e}\nExecution output:\n{output_captured}",
+            "needs_probe": False,
+            "extracted_skills": ["Python"],
+            "extracted_info": {}
+        }
+    finally:
+        # Restore stdout
+        sys.stdout = old_stdout
+
+
 def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
     """
     Evaluates the candidate's answer against the technical bootcamp rubric,
@@ -405,6 +534,7 @@ def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
     q_options = None
     q_initial_code = None
     q_solution_test = None
+    q_data = {}
     try:
         q_data = json.loads(question)
         if isinstance(q_data, dict) and "type" in q_data:
@@ -416,9 +546,30 @@ def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
     except:
         pass
 
+    # STEP 3: Deterministic Objective Evaluator Bypass
+    if q_type in ("multiple_choice", "true_false"):
+        return evaluate_objective_answer(q_data if isinstance(q_data, dict) else {}, answer)
+
+    # STEP 4: Isolated Code Execution Verification
+    if q_type == "coding":
+        code_res = execute_and_test_code(answer, q_solution_test)
+        if code_res["success"]:
+            # If passes successfully, skip LLM call and return score and output immediately
+            return {
+                "score": code_res["score"],
+                "feedback": code_res["feedback"],
+                "needs_probe": code_res["needs_probe"],
+                "extracted_skills": code_res["extracted_skills"],
+                "extracted_info": code_res["extracted_info"]
+            }
+        # If it fails assertions or runtime errors, we fall back to LLM step below
+        # but with custom system prompt injecting the execution failure details.
+
     parser = PydanticOutputParser(pydantic_object=EvaluationResult)
 
     if q_type == "multiple_choice" or q_type == "true_false":
+        # Note: This block is unreachable now because of Step 3 bypass above, 
+        # but kept to maintain structure and fail-safe options.
         system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
 Your goal is to parse the candidate's selection, evaluate if it is correct, and return a structured JSON object.
 
@@ -485,8 +636,11 @@ Bootcamp Rubric Guidelines:
 Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
 """
     elif q_type == "coding":
+        # Coding fallback mode with LLM critique
+        failure_details = code_res["feedback"] if 'code_res' in locals() else "Unknown code execution error."
         system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
 Your goal is to evaluate the candidate's submitted Python code for a programming exercise.
+Note that the candidate's code was executed locally and failed one or more assertions or threw a runtime exception.
 
 [CONTEXT]
 Programming Problem:
@@ -509,17 +663,21 @@ Candidate's Submitted Code:
 {answer}
 </candidate_answer>
 
+Execution & Test Failure Details:
+<failure_details>
+{failure_details}
+</failure_details>
+
 Bootcamp Rubric Guidelines:
-- Excellent (Score 5): Clean, correct, well-structured code with correct logic and optimal time complexity.
 - Good (Score 3-4): Code has minor logical issues, styling bugs, or sub-optimal complexity but functions.
 - Weak (Score 1-2): Syntax errors, completely incorrect logic, or empty solution.
 
 [STRICT EVALUATION INSTRUCTIONS]
-1. Grading: Assign an integer from 1 to 5. Be fair but strict.
+1. Grading: Assign an integer from 1 to 5 based on code structure and attempt quality. Since the code failed assertions, assign at most 3 or 4 depending on logical proximity to the solution. Assign 1 or 2 for syntax or compilation errors.
 2. Probing Flag ('needs_probe'): Set this to `false` as coding exercises do not require probing.
 3. Skill Extraction: Extract explicit technical terms, libraries, or patterns used (e.g. 'Python', 'List comprehension', 'Primes').
 4. Information Extraction ('extracted_info'): Extract any key facts.
-5. Critique Language: Write the 'feedback' in professional English, highlighting syntax correctness, clean structure, complexity, and how it can be improved.
+5. Critique Language: Write the 'feedback' in professional English, explaining why the assertions/tests failed, explaining the logic gaps, and how they can improve it.
 
 [CRITICAL OUTPUT FORMAT CONTRACT]
 {parser.get_format_instructions()}
@@ -527,6 +685,7 @@ Bootcamp Rubric Guidelines:
 Strictly JSON only. Do NOT include any markdown code blocks. Start directly with the opening curly brace '{{' and end with the closing curly brace '}}'.
 """
     else: # text
+        # STEP 5: Inject Linguistic Isolation Prompt Guardrails
         system_prompt = f"""You are an elite, objective technical interviewer evaluating candidate answers for an intensive AI and Software Engineering Bootcamp.
 Your absolute goal is to parse the candidate's response, map it to the strict rubric below, and return a structured JSON object.
 
@@ -548,10 +707,11 @@ Bootcamp Rubric Guidelines:
 
 [STRICT EVALUATION INSTRUCTIONS]
 1. Grading: Assign an integer from 1 to 5. Be fair but strict. Do not give a 5 unless the candidate provided real technical depth or examples.
-2. Probing Flag ('needs_probe'): Set this to `true` ONLY if the answer is technically on the right track but too short, shallow, or generic, meaning a follow-up question is required to judge their actual skill. Otherwise, set it to `false`.
-3. Skill Extraction: Scan the <candidate_answer> and extract explicit technical terms, frameworks, libraries, or architectural patterns mentioned.
-4. Information Extraction ('extracted_info'): Extract key facts from the candidate's response.
-5. Critique Language: Write the 'feedback' completely in professional English.
+2. Linguistic Guardrails: Evaluate the response purely on logical consistency, conceptual grasp, and structural accuracy. Disregard candidate accent, syntax elegance, or vocabulary range.
+3. Probing Flag ('needs_probe'): Set this to `true` ONLY if the answer is technically on the right track but too short, shallow, or generic, meaning a follow-up question is required to judge their actual skill. Otherwise, set it to `false`.
+4. Skill Extraction: Scan the <candidate_answer> and extract explicit technical terms, frameworks, libraries, or architectural patterns mentioned.
+5. Information Extraction ('extracted_info'): Extract key facts from the candidate's response.
+6. Critique Language: Write the 'feedback' completely in professional English.
 
 [CRITICAL OUTPUT FORMAT CONTRACT]
 {parser.get_format_instructions()}
@@ -680,14 +840,63 @@ def record_turn_and_update_profile(
     topic: str,
     question: str,
     answer: str,
-    eval_result: dict
-) -> bool:
+    eval_result: dict,
+    current_scores: dict = None
+) -> (bool, dict):
     """Persists interview turn to Supabase and updates candidate structured profile (long-term memory)."""
+    # Initialize / load current scores
+    scores = {}
+    if _db_client:
+        try:
+            res = _db_client.table("interview_sessions").select("scores").eq("id", session_id).execute()
+            if res.data and res.data[0].get("scores"):
+                scores = res.data[0]["scores"]
+        except Exception as e:
+            print(f"Error fetching current scores from database: {e}")
+            
+    if not scores:
+        scores = current_scores or {}
+        
+    if not isinstance(scores, dict) or "topic_scores" not in scores:
+        scores = {
+            "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
+            "topic_scores": {}
+        }
+        
+    # Append the new turn to the specific topic_scores[topic]["turns"] list
+    topic_data = scores.setdefault("topic_scores", {}).setdefault(topic, {
+        "final_topic_score": 0.0,
+        "turns": []
+    })
+    
+    new_turn = {
+        "turn_number": turn_number,
+        "score": eval_result.get("score"),
+        "feedback": eval_result.get("feedback"),
+        "extracted_skills": eval_result.get("extracted_skills", []),
+        "extracted_info": eval_result.get("extracted_info", {})
+    }
+    
+    # Avoid duplicate turn logging (just in case)
+    topic_data["turns"] = [t for t in topic_data["turns"] if t.get("turn_number") != turn_number]
+    topic_data["turns"].append(new_turn)
+    
+    # Recalculate that topic's final_topic_score
+    valid_scores = [t["score"] for t in topic_data["turns"] if t.get("score") is not None]
+    topic_data["final_topic_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+    
+    # Recalculate summary metrics
+    scores["summary_metrics"]["total_turns_taken"] = sum(len(topic_info["turns"]) for topic_info in scores["topic_scores"].values())
+    scores["summary_metrics"]["overall_score"] = calculate_score(scores)
+
     if not _db_client:
         print(f"[Fallback/Stub] Saving profile for {candidate_id}: {topic} = {eval_result['score']}")
-        return True
+        return True, scores
         
     try:
+        # Update scores in interview_sessions
+        _db_client.table("interview_sessions").update({"scores": scores}).eq("id", session_id).execute()
+
         # 1. Insert turn record into interview_turns
         turn_data = {
             "session_id": session_id,
@@ -759,10 +968,10 @@ def record_turn_and_update_profile(
                 _db_client.table("candidate_profiles").update({"projects": proj_list}).eq("candidate_id", candidate_id).execute()
                 
         print(f"Successfully saved turn {turn_number} ({topic}) to Supabase.")
-        return True
+        return True, scores
     except Exception as e:
         print(f"Error saving turn for {candidate_id} to Supabase: {e}")
-        return False
+        return False, scores
 
 
 def log_message(session_id: str, role: str, content: str) -> None:
@@ -800,7 +1009,24 @@ def identify_missing_info(topics_covered: list, required_topics: list) -> list:
 
 def calculate_score(scores: dict) -> float:
     """Computes the overall candidate score (rounded to 2 decimal places)."""
-    return round(sum(scores.values()) / len(scores), 2) if scores else 0.0
+    if not scores:
+        return 0.0
+    if "topic_scores" in scores:
+        topic_scores = scores.get("topic_scores", {})
+        active_scores = [
+            info.get("final_topic_score", 0.0) 
+            for info in topic_scores.values() 
+            if info.get("final_topic_score") is not None
+        ]
+        if not active_scores:
+            return 0.0
+        return round(sum(active_scores) / len(active_scores), 2)
+    else:
+        # Fallback for flat dictionary
+        valid_scores = [v for v in scores.values() if v is not None]
+        if not valid_scores:
+            return 0.0
+        return round(sum(valid_scores) / len(valid_scores), 2)
 
 
 def generate_report(session_id: str, candidate_id: str, scores: dict, candidate_name: str) -> dict:
@@ -856,7 +1082,7 @@ Return JSON only. Start directly with '{{' and end with '}}'.
             # 1. Update interview session status
             _db_client.table("interview_sessions").update({
                 "status": "completed",
-                "ended_at": "now()",
+                "ended_at": datetime.now(timezone.utc).isoformat(),
                 "scores": scores
             }).eq("id", session_id).execute()
             

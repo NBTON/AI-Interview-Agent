@@ -21,7 +21,10 @@ initial_state = {
     "topics_covered": [],
     "questions_asked": [],
     "answers": [],
-    "scores": {},
+    "scores": {
+        "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
+        "topic_scores": {}
+    },
     "missing_info": [],
     "last_question": "",
     "last_answer": "",
@@ -33,6 +36,8 @@ initial_state = {
     "feedback": "",
     "is_complete": False,
     "final_report": None,
+    "tier_assigned": "",
+    "skills_max_turns": 3
 }
 
 config = {"configurable": {"thread_id": "test-001"}}

@@ -6,7 +6,8 @@ from nodes import (
     node_evaluation,
     node_profile_builder,
     node_interviewer,
-    node_wrap_up
+    node_wrap_up,
+    determine_next_topic_routing
 )
 from db import get_postgres_dsn
 
@@ -52,6 +53,7 @@ def build_graph():
     builder.add_node("interviewer", node_interviewer)
     builder.add_node("evaluation", node_evaluation)
     builder.add_node("profile_builder", node_profile_builder)
+    builder.add_node("determine_next_topic_routing", determine_next_topic_routing)
     builder.add_node("wrap_up", node_wrap_up)
 
     # Set entry point
@@ -59,7 +61,8 @@ def build_graph():
 
     # Define simple edges
     builder.add_edge("init", "router_node")
-    builder.add_edge("profile_builder", "router_node")
+    builder.add_edge("profile_builder", "determine_next_topic_routing")
+    builder.add_edge("determine_next_topic_routing", "router_node")
     
     # Conditional routing from router_node using node_router
     builder.add_conditional_edges("router_node", node_router, {
@@ -83,3 +86,4 @@ def build_graph():
         checkpointer=checkpointer,
         interrupt_before=["evaluation"]
     )
+
