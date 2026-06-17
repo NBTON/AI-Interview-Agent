@@ -145,7 +145,7 @@ erDiagram
 4. **Resuming with Answer**: The candidate supplies an answer, setting `last_answer`. The graph resumes.
 5. **Evaluation & Memory Consolidation**: The Evaluation Agent scores the response. The Profile Builder Agent records the turn, appends extracted facts to `candidate_profiles`, and updates topic coverage.
 6. **Adaptive Probing**: If the Evaluation Agent set `needs_probe = true` (and we have probed less than 2 times on this topic), the topic is *not* marked as covered. The Interviewer Agent will generate a follow-up question related specifically to their previous response.
-7. **Adaptive Continuation**: After required topics are covered, the interviewer can continue asking adaptive follow-up or assessment questions until the minimum interview length is satisfied.
+7. **Adaptive Continuation**: After the background answer, the graph adapts topic order and depth. Experienced candidates get deeper experience/projects/skills coverage plus light education coverage; beginners get education/skills/projects coverage plus light experience coverage. After required topics are covered, the interviewer can continue asking adaptive follow-up or assessment questions until the minimum interview length is satisfied.
 8. **Wrap Up**: Once at least 10 questions have been answered and coverage is sufficient, or the 30-question hard cap is reached, the Decision Support Agent synthesizes the overall report, updates candidate status, and concludes the interview.
 
 ---

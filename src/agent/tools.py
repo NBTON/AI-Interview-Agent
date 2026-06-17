@@ -1,10 +1,8 @@
 import os
 import uuid
-import sys
-import io
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -30,6 +28,137 @@ class EvaluationResult(BaseModel):
     needs_probe: bool = Field(..., description="True if a follow-up probe question is warranted.")
     extracted_skills: List[str] = Field(default_factory=list, description="Explicit technical skills, tools, or frameworks mentioned.")
     extracted_info: dict = Field(default_factory=dict, description="Structured facts extracted from the answer (e.g. university, degree, company, role, project name, etc.)")
+
+
+def empty_score_payload(tier_assigned: str = "") -> dict:
+    """Return the canonical nested score payload used by state, DB, and UI."""
+    return {
+        "summary_metrics": {
+            "overall_score": 0.0,
+            "total_turns_taken": 0,
+            "tier_assigned": tier_assigned or "",
+        },
+        "topic_scores": {},
+    }
+
+
+def _coerce_score(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_scores_payload(scores: dict | None, tier_assigned: str = "") -> dict:
+    """
+    Normalize legacy flat/turns score payloads into the canonical nested shape:
+    topic_scores[topic].turn_scores[].
+    """
+    if not isinstance(scores, dict) or not scores:
+        return empty_score_payload(tier_assigned)
+
+    if "topic_scores" not in scores:
+        normalized = empty_score_payload(tier_assigned)
+        for topic, score in scores.items():
+            numeric_score = _coerce_score(score)
+            if numeric_score is None:
+                continue
+            normalized["topic_scores"][topic] = {
+                "final_topic_score": numeric_score,
+                "turn_scores": [],
+            }
+        normalized["summary_metrics"]["overall_score"] = calculate_score(normalized)
+        return normalized
+
+    normalized = empty_score_payload(
+        tier_assigned or scores.get("summary_metrics", {}).get("tier_assigned", "")
+    )
+    for key, value in scores.get("summary_metrics", {}).items():
+        normalized["summary_metrics"][key] = value
+
+    for topic, topic_info in (scores.get("topic_scores") or {}).items():
+        if isinstance(topic_info, dict):
+            turn_scores = topic_info.get("turn_scores")
+            if turn_scores is None:
+                turn_scores = topic_info.get("turns", [])
+            if not isinstance(turn_scores, list):
+                turn_scores = []
+
+            cleaned_turns = []
+            for turn in turn_scores:
+                if isinstance(turn, dict):
+                    cleaned_turns.append(turn)
+
+            valid_scores = [
+                _coerce_score(turn.get("score"))
+                for turn in cleaned_turns
+                if _coerce_score(turn.get("score")) is not None
+            ]
+            final_score = _coerce_score(topic_info.get("final_topic_score"))
+            if valid_scores:
+                final_score = sum(valid_scores) / len(valid_scores)
+            elif final_score is None:
+                final_score = 0.0
+
+            normalized["topic_scores"][topic] = {
+                "final_topic_score": final_score,
+                "turn_scores": cleaned_turns,
+            }
+        else:
+            numeric_score = _coerce_score(topic_info)
+            if numeric_score is not None:
+                normalized["topic_scores"][topic] = {
+                    "final_topic_score": numeric_score,
+                    "turn_scores": [],
+                }
+
+    normalized["summary_metrics"]["total_turns_taken"] = sum(
+        len(topic_info.get("turn_scores", []))
+        for topic_info in normalized["topic_scores"].values()
+    )
+    normalized["summary_metrics"]["overall_score"] = calculate_score(normalized)
+    return normalized
+
+
+def append_turn_score(scores: dict | None, topic: str, turn_number: int, eval_result: dict, tier_assigned: str = "") -> dict:
+    """Append or replace one evaluated turn in the canonical nested score payload."""
+    normalized = normalize_scores_payload(scores, tier_assigned)
+    topic_data = normalized["topic_scores"].setdefault(topic, {
+        "final_topic_score": 0.0,
+        "turn_scores": [],
+    })
+
+    new_turn = {
+        "turn_number": turn_number,
+        "score": eval_result.get("score"),
+        "feedback": eval_result.get("feedback"),
+        "extracted_skills": eval_result.get("extracted_skills", []),
+        "extracted_info": eval_result.get("extracted_info", {}),
+    }
+
+    topic_data["turn_scores"] = [
+        turn for turn in topic_data.get("turn_scores", [])
+        if turn.get("turn_number") != turn_number
+    ]
+    topic_data["turn_scores"].append(new_turn)
+    topic_data["turn_scores"].sort(key=lambda turn: turn.get("turn_number", 0))
+
+    valid_scores = [
+        _coerce_score(turn.get("score"))
+        for turn in topic_data["turn_scores"]
+        if _coerce_score(turn.get("score")) is not None
+    ]
+    topic_data["final_topic_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+    normalized["summary_metrics"]["total_turns_taken"] = sum(
+        len(topic_info.get("turn_scores", []))
+        for topic_info in normalized["topic_scores"].values()
+    )
+    normalized["summary_metrics"]["overall_score"] = calculate_score(normalized)
+    if tier_assigned:
+        normalized["summary_metrics"]["tier_assigned"] = tier_assigned
+    return normalized
 
 
 def get_program_requirements() -> dict:
@@ -174,10 +303,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
                 "topics_covered": [],
                 "missing_topics": required_topics,
                 "turn_count": 0,
-                "scores": {
-                    "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
-                    "topic_scores": {}
-                }
+                "scores": empty_score_payload()
             }).execute()
             
             # 3. Create profile shell if not exists
@@ -242,11 +368,24 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
     scores = context.get("scores", {})
     bg_score = scores.get("topic_scores", {}).get("background", {}).get("final_topic_score")
     is_experienced = bg_score is not None and bg_score >= 4
+    topic_depth = (context.get("topic_depths", {}) or {}).get(topic, "standard")
     
     if is_experienced:
         difficulty_guideline = "Since the candidate has high scores/strong background, generate an ADVANCED technical question requiring deep implementation details or complex problem-solving."
     else:
         difficulty_guideline = "Since the candidate is a beginner/student, generate a FOUNDATIONAL or ENTRY-LEVEL question assessing core programming concepts and basic database understanding."
+
+    if topic_depth == "light":
+        coverage_guideline = (
+            "This is LIGHT adaptive coverage for a section that used to be skipped. "
+            "Ask one concise, fair screening question that verifies basic exposure without deep probing."
+        )
+    elif topic_depth == "deep":
+        coverage_guideline = (
+            "This is DEEP adaptive coverage. Ask for specific implementation details, tradeoffs, or evidence of hands-on work."
+        )
+    else:
+        coverage_guideline = "This is STANDARD coverage. Ask a balanced question appropriate for admission screening."
 
     user_prompt = (
         f"Topic for this question: {topic}\n\n"
@@ -258,6 +397,7 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
         f"{profile_context}"
         f"Questions already asked:\n{asked_text}\n\n"
         f"Difficulty Level Guideline:\n{difficulty_guideline}\n\n"
+        f"Adaptive Coverage Guideline:\n{coverage_guideline}\n\n"
         f"{type_guideline}\n"
         "Coding questions should vary across tasks such as fixing a bug, completing a function, explaining output, or improving a naive implementation.\n"
         f"Generate a new, different question about '{topic}' that has NOT been asked yet.\n"
@@ -284,8 +424,12 @@ def generate_question(topic: str, context: dict, asked_so_far: list, candidate_i
                 return json.dumps({"type": "true_false", "text": "True or False: Prior hands-on project work is useful preparation for an intensive AI bootcamp.", "options": ["True", "False"], "correct_answer": "True", "initial_code": None, "solution_test": None})
             return json.dumps({"type": "open_ended", "text": "Tell me about your background in software development and AI.", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "education":
+            if topic_depth == "light":
+                return json.dumps({"type": "open_ended", "text": "Briefly tell me about the most relevant course, certificate, or self-study that prepared you for this bootcamp.", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
             return json.dumps({"type": "open_ended", "text": "What is your educational background, and how did it prepare you for this bootcamp?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "experience":
+            if topic_depth == "light":
+                return json.dumps({"type": "open_ended", "text": "Briefly describe any work, internship, volunteer, or simulated project experience where you applied software or data skills.", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
             return json.dumps({"type": "open_ended", "text": "Can you describe your professional experience working with software or data projects?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
         elif topic_name == "projects":
             return json.dumps({"type": "open_ended", "text": "Tell me about a technical project you built. What was your role and what technologies did you use?", "options": None, "correct_answer": None, "initial_code": None, "solution_test": None})
@@ -402,28 +546,61 @@ def evaluate_objective_answer(question_obj: dict, user_answer: str) -> dict:
     """
     Evaluates Multiple Choice (MCQ) and True/False questions locally and deterministically.
     """
+    import re
+
     correct_ans = question_obj.get("correct_answer")
+    q_type = str(question_obj.get("type") or "").strip().lower()
+    options = question_obj.get("options") or []
     if not correct_ans:
-        correct_ans = ""
-        
-    user_clean = str(user_answer).strip().lower()
-    correct_clean = str(correct_ans).strip().lower()
-    
-    # Strict matching heuristics:
-    is_correct = False
-    if user_clean == correct_clean:
-        is_correct = True
-    elif len(user_clean) == 1 and correct_clean.startswith(user_clean):
-        # User typed letter option e.g., 'a' for 'A) No programming exposure'
-        is_correct = True
-    elif user_clean in correct_clean or correct_clean in user_clean:
-        is_correct = True
-    elif correct_clean.startswith(user_clean + ")") or correct_clean.startswith(user_clean + "."):
-        is_correct = True
-        
+        return {
+            "score": 1,
+            "feedback": "This objective question is missing a correct_answer key, so it cannot be graded as correct.",
+            "needs_probe": False,
+            "extracted_skills": [],
+            "extracted_info": {"grading_error": "missing_correct_answer"},
+        }
+
+    def normalize(value: object) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"^[\(\[]?([a-z])[\)\].:-]\s*", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" .")
+
+    def option_letter(value: object) -> str | None:
+        text = str(value or "").strip()
+        match = re.match(r"^\(?([A-Za-z])\)?[\).:-]?\s*", text)
+        return match.group(1).upper() if match else None
+
+    user_raw = str(user_answer or "").strip()
+    correct_raw = str(correct_ans).strip()
+    user_clean = normalize(user_raw)
+    correct_clean = normalize(correct_raw)
+    user_letter = user_raw.upper() if re.fullmatch(r"[A-Za-z]", user_raw) else option_letter(user_raw)
+    correct_letter = option_letter(correct_raw)
+
+    if q_type == "true_false":
+        true_values = {"true", "t", "yes"}
+        false_values = {"false", "f", "no"}
+        correct_bool = True if correct_clean in true_values else False if correct_clean in false_values else None
+        user_bool = True if user_clean in true_values else False if user_clean in false_values else None
+        is_correct = correct_bool is not None and user_bool is not None and user_bool == correct_bool
+    else:
+        option_text_by_letter = {
+            option_letter(option): normalize(option)
+            for option in options
+            if option_letter(option)
+        }
+        expected_texts = {correct_clean}
+        if correct_letter and correct_letter in option_text_by_letter:
+            expected_texts.add(option_text_by_letter[correct_letter])
+
+        is_correct = bool(user_clean and user_clean in expected_texts)
+        if user_raw and re.fullmatch(r"[A-Za-z]", user_raw) and correct_letter:
+            is_correct = user_raw.upper() == correct_letter
+
     score = 5 if is_correct else 1
     feedback = (
-        f"Correct! The expected answer was '{correct_ans}' and your answer '{user_answer}' is correct."
+        f"Correct. The expected answer was '{correct_ans}' and your answer '{user_answer}' is correct."
         if is_correct else
         f"Incorrect. The expected answer was '{correct_ans}', but you answered '{user_answer}'."
     )
@@ -439,44 +616,94 @@ def evaluate_objective_answer(question_obj: dict, user_answer: str) -> dict:
 
 def execute_and_test_code(submitted_code: str, test_case_script: str) -> dict:
     """
-    Executes raw Python code submissions in an isolated namespace and runs assertions.
+    Executes raw Python code submissions in a child Python process and runs assertions.
     """
+    import ast
+    import re
+    import subprocess
     import sys
-    import io
-    
-    # Capturing stdout safely
-    old_stdout = sys.stdout
-    redirected_output = io.StringIO()
-    sys.stdout = redirected_output
-    
-    local_namespace = {}
-    
-    # Preprocess test case script to ensure expressions are assertions
-    test_lines = []
-    if test_case_script:
-        for line in test_case_script.strip().splitlines():
+
+    def normalize_test_script(raw_script: str | None) -> str:
+        if not raw_script:
+            return ""
+        test_lines = []
+        comparison_pattern = re.compile(r"(==|!=|<=|>=|<|>|\bis\b|\bin\b)")
+        for line in raw_script.strip().splitlines():
             line_str = line.strip()
             if not line_str:
                 continue
-            if (not line_str.startswith("assert") 
-                and not line_str.startswith("def ") 
-                and not line_str.startswith("class ") 
-                and ("==" in line_str or ">" in line_str or "<" in line_str or "is" in line_str)):
+            if (
+                not line_str.startswith(("assert ", "def ", "class ", "for ", "while ", "if ", "with ", "try:", "except "))
+                and comparison_pattern.search(line_str)
+            ):
                 test_lines.append(f"assert {line_str}")
             else:
                 test_lines.append(line_str)
-    
-    combined_test_script = "\n".join(test_lines)
+        return "\n".join(test_lines)
+
+    def disallowed_reason(code: str) -> str | None:
+        blocked_import_roots = {"os", "sys", "subprocess", "socket", "pathlib", "shutil", "requests"}
+        blocked_calls = {"open", "exec", "eval", "compile", "input", "__import__"}
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name.split(".")[0] for alias in node.names]
+                elif node.module:
+                    names = [node.module.split(".")[0]]
+                blocked = sorted(set(names) & blocked_import_roots)
+                if blocked:
+                    return f"Use of blocked module(s): {', '.join(blocked)}"
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+                return f"Use of blocked function: {node.func.id}"
+        return None
+
+    combined_test_script = normalize_test_script(test_case_script)
     full_code = f"{submitted_code}\n\n{combined_test_script}"
-    
+    blocked = disallowed_reason(full_code)
+    if blocked:
+        return {
+            "success": False,
+            "score": 2,
+            "feedback": f"Code execution blocked by the sandbox guard. {blocked}.",
+            "needs_probe": False,
+            "extracted_skills": ["Python"],
+            "extracted_info": {"sandbox_blocked": True, "reason": blocked},
+        }
+
     try:
-        # Run combined script in isolated namespace using exec
-        exec(full_code, {}, local_namespace)
-        
-        # Restore stdout
-        sys.stdout = old_stdout
-        output_captured = redirected_output.getvalue()
-        
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", full_code],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output_captured = completed.stdout or ""
+        error_output = completed.stderr or ""
+
+        if completed.returncode != 0:
+            if "AssertionError" in error_output:
+                return {
+                    "success": False,
+                    "score": 3,
+                    "feedback": f"Code executed but failed logical assertions.\nError: {error_output.strip()}\nExecution output:\n{output_captured}",
+                    "needs_probe": False,
+                    "extracted_skills": ["Python"],
+                    "extracted_info": {},
+                }
+            return {
+                "success": False,
+                "score": 2,
+                "feedback": f"Code execution failed due to syntax or runtime error.\nError: {error_output.strip()}\nExecution output:\n{output_captured}",
+                "needs_probe": False,
+                "extracted_skills": ["Python"],
+                "extracted_info": {},
+            }
+
         return {
             "success": True,
             "score": 5,
@@ -485,33 +712,24 @@ def execute_and_test_code(submitted_code: str, test_case_script: str) -> dict:
             "extracted_skills": ["Python"],
             "extracted_info": {}
         }
-    except AssertionError as ae:
-        # Restore stdout
-        sys.stdout = old_stdout
-        output_captured = redirected_output.getvalue()
-        return {
-            "success": False,
-            "score": 3,
-            "feedback": f"Code executed but failed logical assertions.\nError: {ae}\nExecution output:\n{output_captured}",
-            "needs_probe": False,
-            "extracted_skills": ["Python"],
-            "extracted_info": {}
-        }
-    except Exception as e:
-        # Restore stdout
-        sys.stdout = old_stdout
-        output_captured = redirected_output.getvalue()
+    except subprocess.TimeoutExpired:
         return {
             "success": False,
             "score": 2,
-            "feedback": f"Code execution failed due to syntax or runtime error.\nError: {type(e).__name__}: {e}\nExecution output:\n{output_captured}",
+            "feedback": "Code execution timed out after 5 seconds.",
+            "needs_probe": False,
+            "extracted_skills": ["Python"],
+            "extracted_info": {"timeout": True},
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "score": 2,
+            "feedback": f"Code execution failed due to sandbox runtime error.\nError: {type(e).__name__}: {e}",
             "needs_probe": False,
             "extracted_skills": ["Python"],
             "extracted_info": {}
         }
-    finally:
-        # Restore stdout
-        sys.stdout = old_stdout
 
 
 def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
@@ -553,17 +771,13 @@ def evaluate_answer(question: str, answer: str, rubric: dict) -> dict:
     # STEP 4: Isolated Code Execution Verification
     if q_type == "coding":
         code_res = execute_and_test_code(answer, q_solution_test)
-        if code_res["success"]:
-            # If passes successfully, skip LLM call and return score and output immediately
-            return {
-                "score": code_res["score"],
-                "feedback": code_res["feedback"],
-                "needs_probe": code_res["needs_probe"],
-                "extracted_skills": code_res["extracted_skills"],
-                "extracted_info": code_res["extracted_info"]
-            }
-        # If it fails assertions or runtime errors, we fall back to LLM step below
-        # but with custom system prompt injecting the execution failure details.
+        return {
+            "score": code_res["score"],
+            "feedback": code_res["feedback"],
+            "needs_probe": code_res["needs_probe"],
+            "extracted_skills": code_res["extracted_skills"],
+            "extracted_info": code_res["extracted_info"]
+        }
 
     parser = PydanticOutputParser(pydantic_object=EvaluationResult)
 
@@ -856,38 +1070,8 @@ def record_turn_and_update_profile(
             
     if not scores:
         scores = current_scores or {}
-        
-    if not isinstance(scores, dict) or "topic_scores" not in scores:
-        scores = {
-            "summary_metrics": { "overall_score": 0.0, "total_turns_taken": 0, "tier_assigned": "" },
-            "topic_scores": {}
-        }
-        
-    # Append the new turn to the specific topic_scores[topic]["turns"] list
-    topic_data = scores.setdefault("topic_scores", {}).setdefault(topic, {
-        "final_topic_score": 0.0,
-        "turns": []
-    })
-    
-    new_turn = {
-        "turn_number": turn_number,
-        "score": eval_result.get("score"),
-        "feedback": eval_result.get("feedback"),
-        "extracted_skills": eval_result.get("extracted_skills", []),
-        "extracted_info": eval_result.get("extracted_info", {})
-    }
-    
-    # Avoid duplicate turn logging (just in case)
-    topic_data["turns"] = [t for t in topic_data["turns"] if t.get("turn_number") != turn_number]
-    topic_data["turns"].append(new_turn)
-    
-    # Recalculate that topic's final_topic_score
-    valid_scores = [t["score"] for t in topic_data["turns"] if t.get("score") is not None]
-    topic_data["final_topic_score"] = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
-    
-    # Recalculate summary metrics
-    scores["summary_metrics"]["total_turns_taken"] = sum(len(topic_info["turns"]) for topic_info in scores["topic_scores"].values())
-    scores["summary_metrics"]["overall_score"] = calculate_score(scores)
+
+    scores = append_turn_score(scores, topic, turn_number, eval_result)
 
     if not _db_client:
         print(f"[Fallback/Stub] Saving profile for {candidate_id}: {topic} = {eval_result['score']}")
@@ -1016,14 +1200,14 @@ def calculate_score(scores: dict) -> float:
         active_scores = [
             info.get("final_topic_score", 0.0) 
             for info in topic_scores.values() 
-            if info.get("final_topic_score") is not None
+            if isinstance(info, dict) and info.get("final_topic_score") is not None
         ]
         if not active_scores:
             return 0.0
         return round(sum(active_scores) / len(active_scores), 2)
     else:
         # Fallback for flat dictionary
-        valid_scores = [v for v in scores.values() if v is not None]
+        valid_scores = [float(v) for v in scores.values() if _coerce_score(v) is not None]
         if not valid_scores:
             return 0.0
         return round(sum(valid_scores) / len(valid_scores), 2)
@@ -1031,6 +1215,7 @@ def calculate_score(scores: dict) -> float:
 
 def generate_report(session_id: str, candidate_id: str, scores: dict, candidate_name: str) -> dict:
     """Compiles the final candidate summary report using an LLM and persists it to the database."""
+    scores = normalize_scores_payload(scores)
     overall_score = calculate_score(scores)
     
     prompt = f"""You are the Decision Support Agent for an intensive AI and Software Engineering Bootcamp.

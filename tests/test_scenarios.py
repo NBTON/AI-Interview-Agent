@@ -151,6 +151,9 @@ def run_scenario(scenario_name: str, expected_recommendation: list, thread_id: s
         "feedback": "",
         "is_complete": False,
         "final_report": None,
+        "tier_assigned": "",
+        "skills_max_turns": 3,
+        "topic_depths": {},
     }
     
     config = {"configurable": {"thread_id": thread_id}}
