@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.coverage
 .venv/
 venv/
 ENV/
@@ -13,5 +14,11 @@ env/
 .agents/
 .mcp.json
 skills-lock.json
+tests/reports/
+*.xml
+*.html
+*.log
+.coverage
+htmlcov/
 
 
