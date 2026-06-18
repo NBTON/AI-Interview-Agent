@@ -1,14 +1,19 @@
 """
 Candidate Routes - Integrated with Supabase DB & Excel local fallback
 """
+import hashlib
+import io
 import os
+import secrets
+import smtplib
 import sys
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from email.message import EmailMessage
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import List, Optional
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Ensure project root and src/ are in sys.path
@@ -45,6 +50,10 @@ if _supabase_url and _supabase_key and _supabase_key != "your_supabase_service_r
 class CandidateVerify(BaseModel):
     email: str
 
+class CandidateCodeVerify(BaseModel):
+    email: str
+    code: str
+
 class CandidateResponse(BaseModel):
     id: Optional[str] = None
     name: str
@@ -59,6 +68,80 @@ class CandidateListResponse(BaseModel):
     completed: int
     pending: int
     average_score: float
+
+class CandidateImportError(BaseModel):
+    row: int
+    errors: List[str]
+
+class CandidateImportResponse(BaseModel):
+    success: bool
+    inserted: int
+    skipped: int
+    errors: List[CandidateImportError]
+    message: str
+
+_verification_codes: dict[str, dict] = {}
+CODE_TTL_MINUTES = int(os.environ.get("CANDIDATE_CODE_TTL_MINUTES", "10"))
+
+
+def _normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def _code_secret() -> str:
+    return os.environ.get("CANDIDATE_TOKEN_SECRET") or os.environ.get("APP_SECRET_KEY") or "local-dev-candidate-code-secret"
+
+
+def _hash_code(email: str, code: str) -> str:
+    return hashlib.sha256(f"{_normalize_email(email)}:{code}:{_code_secret()}".encode("utf-8")).hexdigest()
+
+
+def _candidate_match(df: pd.DataFrame, email: str) -> pd.DataFrame:
+    if "email" not in df.columns:
+        return pd.DataFrame()
+    return df[df["email"].astype(str).str.strip().str.lower() == _normalize_email(email)]
+
+
+def _send_verification_email(email: str, code: str) -> None:
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM") or smtp_user
+
+    if not (smtp_host and sender):
+        print(f"[candidate-verification] Code for {email}: {code}")
+        return
+
+    message = EmailMessage()
+    message["Subject"] = "Your Interview Agent verification code"
+    message["From"] = sender
+    message["To"] = email
+    message.set_content(
+        f"Your Interview Agent verification code is {code}.\n\n"
+        f"This code expires in {CODE_TTL_MINUTES} minutes."
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as smtp:
+        smtp.starttls()
+        if smtp_user and smtp_password:
+            smtp.login(smtp_user, smtp_password)
+        smtp.send_message(message)
+
+
+def _issue_verification_code(email: str) -> None:
+    normalized = _normalize_email(email)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    _verification_codes[normalized] = {
+        "code_hash": _hash_code(normalized, code),
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=CODE_TTL_MINUTES),
+    }
+    _send_verification_email(normalized, code)
+
+
+def _db_status(value: str) -> str:
+    normalized = str(value or "new").strip().lower()
+    return normalized if normalized in {"new", "interviewing", "interviewed", "accepted", "rejected"} else "new"
 
 def load_candidates_data() -> pd.DataFrame:
     """Load candidates from Supabase DB, falling back to Excel if not available"""
@@ -118,23 +201,177 @@ def save_candidates_data(df):
 
 @router.post("/candidates/verify")
 def verify_candidate(request: CandidateVerify):
-    """Verify candidate email - matches Candidate.py page"""
+    """Verify that the candidate exists and send a short-lived email code."""
     df = load_candidates_data()
-    
-    # Check if email exists
-    match = df[df["email"] == request.email]
+    email = _normalize_email(request.email)
+    match = _candidate_match(df, email)
     
     if not match.empty:
         candidate_name = match.iloc[0]["name"]
+        try:
+            _issue_verification_code(email)
+        except Exception as exc:
+            print(f"Error sending candidate verification email: {exc}")
+            raise HTTPException(status_code=500, detail="Could not send verification code. Please try again.")
         return {
             "success": True,
             "name": candidate_name,
-            "email": request.email,
-            "candidate_token": create_candidate_token(request.email),
-            "message": "Email verified successfully"
+            "email": email,
+            "verification_required": True,
+            "expires_in_minutes": CODE_TTL_MINUTES,
+            "message": "Verification code sent to your email."
         }
-    else:
+    raise HTTPException(status_code=404, detail="Email not found. Please contact HR.")
+
+
+@router.post("/candidates/verify-code")
+def verify_candidate_code(request: CandidateCodeVerify):
+    """Confirm the email code and issue the signed interview access token."""
+    email = _normalize_email(request.email)
+    code = str(request.code or "").strip()
+    record = _verification_codes.get(email)
+    if not record:
+        raise HTTPException(status_code=400, detail="No active verification code. Please request a new code.")
+    if datetime.now(timezone.utc) > record["expires_at"]:
+        _verification_codes.pop(email, None)
+        raise HTTPException(status_code=400, detail="Verification code expired. Please request a new code.")
+    if not secrets.compare_digest(record["code_hash"], _hash_code(email, code)):
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+
+    df = load_candidates_data()
+    match = _candidate_match(df, email)
+    if match.empty:
         raise HTTPException(status_code=404, detail="Email not found. Please contact HR.")
+
+    _verification_codes.pop(email, None)
+    candidate_name = match.iloc[0]["name"]
+    return {
+        "success": True,
+        "name": candidate_name,
+        "email": email,
+        "candidate_token": create_candidate_token(email),
+        "message": "Email verified successfully."
+    }
+
+
+@router.post("/candidates/resend-code")
+def resend_candidate_code(request: CandidateVerify):
+    """Resend a candidate verification code if the email exists."""
+    return verify_candidate(request)
+
+
+def _standardize_import_columns(df: pd.DataFrame) -> pd.DataFrame:
+    aliases = {
+        "full name": "name",
+        "fullname": "name",
+        "candidate name": "name",
+        "student name": "name",
+        "e-mail": "email",
+        "email address": "email",
+        "program": "position",
+        "session": "session",
+        "bootcamp": "position",
+    }
+    renamed = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        renamed[col] = aliases.get(key, key.replace(" ", "_"))
+    return df.rename(columns=renamed)
+
+
+def _row_errors(row: pd.Series) -> list[str]:
+    errors = []
+    name = row.get("name")
+    if pd.isna(name) or not str(name).strip():
+        errors.append("name is required")
+    email = _normalize_email(row.get("email"))
+    if not email:
+        errors.append("email is required")
+    elif "@" not in email or "." not in email.split("@")[-1]:
+        errors.append("email is invalid")
+    return errors
+
+
+@router.post("/candidates/import-excel", response_model=CandidateImportResponse)
+async def import_candidates_excel(file: UploadFile = File(...)):
+    """Import recruiter-provided .xlsx candidate rows with row-level validation."""
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are supported.")
+
+    try:
+        content = await file.read()
+        imported = _standardize_import_columns(pd.read_excel(io.BytesIO(content)))
+    except Exception as exc:
+        print(f"Error parsing candidate Excel import: {exc}")
+        raise HTTPException(status_code=400, detail="Could not parse the Excel file.")
+
+    required = {"name", "email"}
+    missing = sorted(required - set(imported.columns))
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required columns: {', '.join(missing)}")
+
+    inserted_rows = []
+    errors: list[CandidateImportError] = []
+    seen_emails: set[str] = set()
+
+    for index, row in imported.iterrows():
+        row_number = int(index) + 2
+        row_errors = _row_errors(row)
+        email = _normalize_email(row.get("email"))
+        if email in seen_emails:
+            row_errors.append("duplicate email in uploaded file")
+        if row_errors:
+            errors.append(CandidateImportError(row=row_number, errors=row_errors))
+            continue
+
+        seen_emails.add(email)
+        name = str(row.get("name")).strip()
+        position = str(row.get("position") or row.get("program") or "Agentic AI").strip()
+        session = str(row.get("session") or row.get("cohort") or "").strip()
+        status = str(row.get("status") or "Pending").strip()
+        inserted_rows.append({
+            "name": name,
+            "email": email,
+            "position": position,
+            "session": session,
+            "status": status,
+            "score": 0.0,
+        })
+
+        if _db_client:
+            try:
+                _db_client.table("candidates").upsert({
+                    "full_name": name,
+                    "email": email,
+                    "status": _db_status(status),
+                    "metadata": {"position": position, "session": session},
+                }, on_conflict="email").execute()
+            except Exception as exc:
+                errors.append(CandidateImportError(row=row_number, errors=[f"database insert failed: {exc}"]))
+                inserted_rows.pop()
+
+    if inserted_rows:
+        existing = pd.DataFrame()
+        if EXCEL_PATH.exists():
+            try:
+                existing = pd.read_excel(EXCEL_PATH)
+            except Exception:
+                existing = pd.DataFrame()
+        merged = pd.concat([existing, pd.DataFrame(inserted_rows)], ignore_index=True)
+        if "email" in merged.columns:
+            merged["email"] = merged["email"].astype(str).str.strip().str.lower()
+            merged = merged.drop_duplicates(subset=["email"], keep="last")
+        save_candidates_data(merged)
+
+    inserted = len(inserted_rows)
+    skipped = len(imported) - inserted
+    return CandidateImportResponse(
+        success=inserted > 0 and not errors,
+        inserted=inserted,
+        skipped=skipped,
+        errors=errors,
+        message=f"Imported {inserted} candidates. {skipped} rows skipped.",
+    )
 
 @router.get("/candidates", response_model=CandidateListResponse)
 def get_all_candidates():

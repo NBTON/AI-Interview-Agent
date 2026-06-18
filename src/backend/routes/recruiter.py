@@ -2,6 +2,7 @@
 Recruiter Routes - Live Supabase analytics for admissions dashboards.
 """
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -127,6 +128,11 @@ def _candidate_summary(candidate: dict, report: Optional[dict], session: Optiona
 
 
 def _load_candidate_bundle(candidate_id: str) -> dict:
+    try:
+        uuid.UUID(str(candidate_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
     db = _require_db()
     try:
         candidate_res = db.table("candidates").select("*").eq("id", candidate_id).limit(1).execute()
@@ -270,6 +276,11 @@ def get_all_sessions():
 @router.get("/sessions/{session_id}")
 def get_session_details(session_id: str):
     """Get one live session with report, candidate, turns, and chat logs."""
+    try:
+        uuid.UUID(str(session_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Session not found")
+
     db = _require_db()
     try:
         session_res = db.table("interview_sessions").select("*").eq("id", session_id).limit(1).execute()

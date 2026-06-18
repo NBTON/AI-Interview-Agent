@@ -170,6 +170,8 @@ class StartInterviewResponse(BaseModel):
 class SubmitAnswerRequest(BaseModel):
     session_id: str
     answer: str
+    candidate_email: Optional[str] = None
+    candidate_token: Optional[str] = None
 
 class SubmitAnswerResponse(BaseModel):
     session_id: str
@@ -194,6 +196,10 @@ def _require_db_client():
 
 def _fetch_session(session_id: str) -> dict:
     db = _require_db_client()
+    try:
+        uuid.UUID(str(session_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Session not found")
     try:
         res = db.table("interview_sessions").select("*").eq("id", session_id).limit(1).execute()
     except Exception as exc:
@@ -334,7 +340,10 @@ def start_interview(request: StartInterviewRequest):
 def submit_answer(request: SubmitAnswerRequest):
     """Submit an answer and resume the LangGraph execution to get evaluation and next question"""
     session_id = request.session_id
-    _fetch_session(session_id)
+    session = _fetch_session(session_id)
+    candidate = _fetch_candidate(session["candidate_id"])
+    candidate_email = request.candidate_email or candidate.get("email")
+    verify_candidate_token(request.candidate_token or "", candidate_email or "")
         
     config = {"configurable": {"thread_id": session_id}}
     
@@ -358,6 +367,13 @@ def submit_answer(request: SubmitAnswerRequest):
                 result = future.result(timeout=120)
             except concurrent.futures.TimeoutError:
                 raise HTTPException(status_code=504, detail="Answer processing timed out. Please try again.")
+
+        state_after = graph.get_state(config)
+        result_values = state_after.values if state_after and state_after.values else result
+        result_turn = int(result.get("turn_count") or 0)
+        state_turn = int(result_values.get("turn_count") or 0) if result_values else -1
+        if result_values and state_turn >= result_turn:
+            result = {**result, **result_values}
         
         is_complete = result.get("is_complete", False)
         feedback = result.get("feedback")
@@ -370,7 +386,9 @@ def submit_answer(request: SubmitAnswerRequest):
         
         # Next question
         next_question_raw = result.get("last_question") if not is_complete else None
-        q_number = result.get("turn_count", 0) + 1
+        refreshed_session = _fetch_session(session_id)
+        persisted_turn_count = refreshed_session.get("turn_count")
+        q_number = int(persisted_turn_count if persisted_turn_count is not None else result.get("turn_count", 0)) + 1
         
         q_text, q_type, options, initial_code = _parse_structured_question(next_question_raw)
 

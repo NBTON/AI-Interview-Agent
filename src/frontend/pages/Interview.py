@@ -7,7 +7,7 @@ import html
 st.set_page_config(page_title="AI Interview Session", page_icon=":material/assignment:", layout="wide")
 
 # Guard: redirect if no candidate verified
-if "candidate_name" not in st.session_state:
+if "candidate_name" not in st.session_state or "candidate_token" not in st.session_state:
     st.warning("Please verify your identity first.")
     st.switch_page("pages/Candidate.py")
     st.stop()
@@ -524,7 +524,9 @@ with col1:
                     try:
                         response = requests.post(f"{API_URL}/interview/answer", json={
                             "session_id": session_id,
-                            "answer": user_answer_value
+                            "answer": user_answer_value,
+                            "candidate_email": st.session_state.get("candidate_email"),
+                            "candidate_token": st.session_state.get("candidate_token")
                         }, timeout=API_TIMEOUT)
                         if response.status_code == 200:
                             data = response.json()

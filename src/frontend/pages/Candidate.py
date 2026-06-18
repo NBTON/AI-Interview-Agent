@@ -176,21 +176,24 @@ with col2:
         </div>
     """, unsafe_allow_html=True)
 
-    email = st.text_input("Email Address", placeholder="e.g. ali@example.com")
+    if "candidate_pending_email" not in st.session_state:
+        st.session_state["candidate_pending_email"] = ""
+    if "candidate_pending_name" not in st.session_state:
+        st.session_state["candidate_pending_name"] = ""
+
+    email = st.text_input("Email Address", value=st.session_state["candidate_pending_email"], placeholder="e.g. ali@example.com")
 
     btn_col1, btn_col2 = st.columns([1, 1])
     with btn_col1:
-        if st.button("Verify & Continue ✔️", use_container_width=True):
+        if st.button("Send Code", use_container_width=True):
             if email.strip():
                 try:
                     response = requests.post(f"{API_URL}/candidates/verify", json={"email": email})
                     if response.status_code == 200:
                         data = response.json()
                         st.success(data["message"])
-                        st.session_state["candidate_name"] = data["name"]
-                        st.session_state["candidate_email"] = email
-                        st.session_state["candidate_token"] = data.get("candidate_token")
-                        st.switch_page("pages/Interview.py")
+                        st.session_state["candidate_pending_email"] = data["email"]
+                        st.session_state["candidate_pending_name"] = data["name"]
                     else:
                         st.error(response.json().get("detail", "Email not found"))
                 except requests.exceptions.ConnectionError:
@@ -203,3 +206,41 @@ with col2:
     with btn_col2:
         if st.button("Back to Home 🏠", use_container_width=True):
             st.switch_page("app.py")
+
+    if st.session_state.get("candidate_pending_email"):
+        st.write("")
+        code = st.text_input("Verification Code", placeholder="6-digit code")
+        verify_col, resend_col = st.columns([1, 1])
+        with verify_col:
+            if st.button("Verify & Continue ✔️", use_container_width=True):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/candidates/verify-code",
+                        json={"email": st.session_state["candidate_pending_email"], "code": code},
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        st.success(data["message"])
+                        st.session_state["candidate_name"] = data["name"]
+                        st.session_state["candidate_email"] = data["email"]
+                        st.session_state["candidate_token"] = data.get("candidate_token")
+                        st.switch_page("pages/Interview.py")
+                    else:
+                        st.error(response.json().get("detail", "Invalid verification code"))
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot connect to backend. Make sure the server is running.")
+                except Exception as e:
+                    st.error(f"Verification error: {str(e)}")
+        with resend_col:
+            if st.button("Resend Code", use_container_width=True):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/candidates/resend-code",
+                        json={"email": st.session_state["candidate_pending_email"]},
+                    )
+                    if response.status_code == 200:
+                        st.success(response.json().get("message", "Verification code resent."))
+                    else:
+                        st.error(response.json().get("detail", "Unable to resend code"))
+                except Exception as e:
+                    st.error(f"Resend error: {str(e)}")

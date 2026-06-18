@@ -188,21 +188,32 @@ The recent merge successfully unified the Frontend (Streamlit), Backend (FastAPI
 ## Installation & Running Instructions
 
 ### Prerequisites
-- Python 3.11+ (up to Python 3.14)
+- Python 3.12
 - An OpenAI API Key (configured in your `.env` file)
 - (Optional) A Supabase project with migration 002 applied
 
 ### Installation
 Clone the repository and install the dependencies:
 ```bash
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 Set up your `.env` file in the root directory:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
+CANDIDATE_TOKEN_SECRET=replace_with_a_long_random_secret
+CANDIDATE_CODE_TTL_MINUTES=10
+# Optional. If omitted, candidate verification codes are printed to the backend log for local demos.
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=
 SUPABASE_URL=your_supabase_project_url_here
 SUPABASE_KEY=your_supabase_service_role_key_here
+SUPABASE_DB_URL=your_supabase_postgres_connection_string_here
 ```
 *Note: If no Supabase URL/Key is provided, the agent automatically falls back to offline/stub mode, printing database operations to the console.*
 
@@ -214,16 +225,80 @@ python src/agent/main.py
 
 ### Running Automated Tests
 
-We provide two test suites to verify the multi-agent graph:
+Run the pytest suite for API, scoring, import, and mocked full-journey coverage:
+
+```bash
+pytest
+```
+
+#### Verified Test Cases and Output
+
+The latest focused verification was run on June 18, 2026 with Python 3.12.13 from the workspace test virtualenv:
+
+```bash
+.\.uv-test-venv-copy\Scripts\python.exe -m pytest tests/integration/test_candidate_journey.py tests/test_interview_route.py -v
+```
+
+Covered test cases:
+- `tests/integration/test_candidate_journey.py::test_full_candidate_journey_with_email_verification` validates candidate email verification, candidate-token enforcement, interview start, answer submission, completion, and Excel score syncing through mocked services.
+- `tests/integration/test_candidate_journey.py::test_recruiter_excel_import_reports_row_errors` validates recruiter Excel import handling and row-level error reporting.
+- `tests/integration/test_candidate_journey.py::test_scoring_payloads_are_predictable_for_answer_types` validates deterministic scoring payloads for supported answer/question types.
+- `tests/test_interview_route.py::test_submit_answer_resumes_from_interviewer_node` validates that answer submission resumes the persisted LangGraph state from the `interviewer` node and returns the next question.
+
+Output:
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-9.1.0, pluggy-1.6.0
+rootdir: C:\Users\nbton\OneDrive - KFUPM\Interview_Agent
+configfile: pytest.ini
+collected 4 items
+
+tests/integration/test_candidate_journey.py::test_full_candidate_journey_with_email_verification PASSED
+tests/integration/test_candidate_journey.py::test_recruiter_excel_import_reports_row_errors PASSED
+tests/integration/test_candidate_journey.py::test_scoring_payloads_are_predictable_for_answer_types PASSED
+tests/test_interview_route.py::test_submit_answer_resumes_from_interviewer_node PASSED
+
+=============================== tests coverage ================================
+Name                               Stmts   Miss  Cover
+------------------------------------------------------
+src\backend\routes\interview.py      305    130    57%
+src\backend\security.py               40      6    85%
+------------------------------------------------------
+TOTAL                               1613    948    41%
+Coverage HTML written to dir tests/reports/coverage/
+Coverage XML written to file tests/reports/coverage.xml
+======================== 4 passed, 1 warning in 13.30s ========================
+```
+
+Full-suite note:
+
+```bash
+.\.uv-test-venv-copy\Scripts\python.exe -m pytest tests/ -v
+```
+
+The full suite collected 77 tests and stopped after 5 failures, with 34 tests passing before `--maxfail=5`. The failures were all backend interview tests blocked by the configured Supabase Postgres checkpointer host not resolving in the local environment:
+
+```text
+FAILED tests/test_backend.py::TestBackend::test_api_start_interview - assert 503 == 200
+FAILED tests/test_backend.py::TestBackend::test_api_submit_answer - KeyError: 'session_id'
+FAILED tests/test_backend.py::TestBackend::test_get_session_status - KeyError: 'session_id'
+FAILED tests/test_backend.py::TestBackend::test_interview_flow_multiple_answers - KeyError: 'session_id'
+FAILED tests/test_backend.py::TestBackend::test_interview_with_very_long_answer - KeyError: 'session_id'
+Error initializing persistent LangGraph checkpointer: failed to resolve host 'db.seosrhbslipeaqpzisgx.supabase.co'
+============= 5 failed, 34 passed, 5 warnings in 69.25s (0:01:09) =============
+```
+
+We also provide two simulator entry points to verify the multi-agent graph:
 
 1. **Basic Flow Verification**: Run a simple single-candidate simulation loop:
    ```bash
-   python agent/test_agent.py
+   python src/agent/main.py
    ```
 
 2. **Multi-Scenario Dynamic Test Suite**: Run a comprehensive verification suite that dynamically tests three candidate personas using an LLM-driven candidate simulator to model realistic interview turn interactions:
    ```bash
-   python agent/test_scenarios.py
+   python tests/integration/test_scenarios.py
    ```
 
 #### Candidate Personas in `test_scenarios.py`:
@@ -280,6 +355,9 @@ Here is an extract from `test_agent.py` showing how the agents coordinate to per
 | :--- | :--- | :--- |
 | `/health` | GET | ✅ Working |
 | `/api/candidates/verify` | POST | ✅ Working |
+| `/api/candidates/verify-code` | POST | ✅ Working |
+| `/api/candidates/resend-code` | POST | ✅ Working |
+| `/api/candidates/import-excel` | POST | ✅ Working |
 | `/api/candidates` | GET | ✅ Working |
 | `/api/candidates/{name}` | GET | ✅ Working |
 | `/api/recruiter/login` | POST | ✅ Working |
@@ -301,3 +379,7 @@ In a new terminal, run:
 ```bash
 streamlit run src/frontend/app.py
 ```
+
+### Demo Script
+
+A step-by-step presentation runbook is available in [`docs/demo_script.md`](docs/demo_script.md). It covers recruiter login, Excel import, candidate email verification, interview completion, scoring, and recruiter report review.
