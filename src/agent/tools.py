@@ -289,7 +289,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
             _db_client.table("candidates").upsert({
                 "id": candidate_uuid,
                 "full_name": candidate_name,
-                "email": raw_candidate_id if "@" in raw_candidate_id else f"{candidate_name.lower().replace(' ', '')}@example.com",
+                "email": raw_candidate_id if "@" in raw_candidate_id else f"{str(raw_candidate_id).lower().replace(' ', '')}@example.com",
                 "status": "interviewing"
             }).execute()
             

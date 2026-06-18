@@ -304,6 +304,24 @@ def api_get(path: str):
         raise RuntimeError(detail)
     return response.json()
 
+def api_post_file(path: str, uploaded_file):
+    files = {
+        "file": (
+            uploaded_file.name,
+            uploaded_file.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    }
+    response = requests.post(f"{API_URL}{path}", files=files, timeout=60)
+    if response.status_code != 200:
+        detail = response.text
+        try:
+            detail = response.json().get("detail", detail)
+        except Exception:
+            pass
+        raise RuntimeError(detail)
+    return response.json()
+
 try:
     dashboard_stats = api_get("/recruiter/dashboard")
     candidates_data = api_get("/recruiter/candidates")
@@ -490,6 +508,26 @@ elif st.session_state.active_page == "candidates":
             All candidate records at a glance.
         </p>
     """, unsafe_allow_html=True)
+
+    st.markdown("<h4 style='color:#00C9A7; font-weight:800; font-family:Outfit,sans-serif; margin-bottom:12px;'>Import Candidate List</h4>", unsafe_allow_html=True)
+    uploaded_candidates = st.file_uploader("Upload .xlsx file", type=["xlsx"], key="candidate_import_xlsx")
+    if uploaded_candidates and st.button("Import Candidates", use_container_width=True):
+        try:
+            result = api_post_file("/candidates/import-excel", uploaded_candidates)
+            st.success(result.get("message", "Candidate import completed."))
+            if result.get("errors"):
+                error_rows = [
+                    {"row": item.get("row"), "errors": "; ".join(item.get("errors", []))}
+                    for item in result["errors"]
+                ]
+                st.warning("Some rows were skipped.")
+                st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
+            else:
+                st.rerun()
+        except Exception as exc:
+            st.error(f"Import failed: {exc}")
+
+    st.markdown("<hr style='border-color:rgba(143,164,190,0.1); margin:28px 0;'>", unsafe_allow_html=True)
 
     if df.empty:
         st.warning("No candidate records found.")

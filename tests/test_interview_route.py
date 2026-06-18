@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 def test_submit_answer_resumes_from_interviewer_node(monkeypatch):
     from backend.routes import interview
+    from backend.security import create_candidate_token
 
     class FakeGraph:
         def __init__(self):
@@ -40,11 +41,23 @@ def test_submit_answer_resumes_from_interviewer_node(monkeypatch):
             }
 
     fake_graph = FakeGraph()
-    monkeypatch.setattr(interview, "_fetch_session", lambda session_id: {"id": session_id})
+    monkeypatch.setattr(
+        interview,
+        "_fetch_session",
+        lambda session_id: {"id": session_id, "candidate_id": "candidate-1", "turn_count": 1},
+    )
+    monkeypatch.setattr(interview, "_fetch_candidate", lambda candidate_id: {"email": "candidate@example.com"})
     monkeypatch.setattr(interview, "_get_graph", lambda: fake_graph)
     monkeypatch.setattr(interview, "_question_limit", lambda: 10)
 
-    response = interview.submit_answer(interview.SubmitAnswerRequest(session_id="session-1", answer="My answer"))
+    response = interview.submit_answer(
+        interview.SubmitAnswerRequest(
+            session_id="session-1",
+            answer="My answer",
+            candidate_email="candidate@example.com",
+            candidate_token=create_candidate_token("candidate@example.com"),
+        )
+    )
 
     assert fake_graph.updated_as_node == "interviewer"
     assert response.next_question == "Second question?"
