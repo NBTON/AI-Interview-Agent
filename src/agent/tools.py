@@ -266,6 +266,11 @@ _llm = _make_llm(temperature=0.7)
 def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program_id: str = None, session_id: str = None) -> dict:
     """Ensures candidate, session, and profile exist in Supabase and returns verified UUIDs."""
     raw_candidate_id = candidate_id
+    candidate_email = (
+        str(raw_candidate_id).strip().lower()
+        if "@" in str(raw_candidate_id)
+        else f"{str(raw_candidate_id).lower().replace(' ', '')}@example.com"
+    )
 
     # Convert string ID to valid UUID format using uuid5 for consistency
     try:
@@ -285,13 +290,28 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
         
     try:
         if _db_client:
-            # 1. Upsert candidate
-            _db_client.table("candidates").upsert({
-                "id": candidate_uuid,
-                "full_name": candidate_name,
-                "email": raw_candidate_id if "@" in raw_candidate_id else f"{str(raw_candidate_id).lower().replace(' ', '')}@example.com",
-                "status": "interviewing"
-            }).execute()
+            # 1. Reuse imported candidates by email. Upserting by generated id can
+            # violate the unique email constraint when the applicant already exists.
+            existing = (
+                _db_client.table("candidates")
+                .select("id")
+                .eq("email", candidate_email)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                candidate_uuid = existing.data[0]["id"]
+                _db_client.table("candidates").update({
+                    "full_name": candidate_name,
+                    "status": "interviewing",
+                }).eq("id", candidate_uuid).execute()
+            else:
+                _db_client.table("candidates").insert({
+                    "id": candidate_uuid,
+                    "full_name": candidate_name,
+                    "email": candidate_email,
+                    "status": "interviewing",
+                }).execute()
             
             # 2. Insert interview session
             _db_client.table("interview_sessions").insert({
@@ -314,7 +334,7 @@ def ensure_candidate_and_session(candidate_id: str, candidate_name: str, program
                 "experience": [],
                 "skills": {"technical": [], "soft": [], "proficiency": {}},
                 "projects": []
-            }).execute()
+            }, on_conflict="candidate_id").execute()
             
             print(f"Initialized database session: {session_uuid} for candidate: {candidate_uuid}")
     except Exception as e:

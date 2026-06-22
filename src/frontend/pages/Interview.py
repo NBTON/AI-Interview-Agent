@@ -3,6 +3,7 @@ import requests
 import sys
 import io
 import html
+import os
 
 st.set_page_config(page_title="AI Interview Session", page_icon=":material/assignment:", layout="wide")
 
@@ -12,7 +13,7 @@ if "candidate_name" not in st.session_state or "candidate_token" not in st.sessi
     st.switch_page("pages/Candidate.py")
     st.stop()
 
-API_URL = "http://localhost:8000/api"
+API_URL = os.environ.get("API_URL", "http://localhost:8000/api").rstrip("/")
 API_TIMEOUT = 125
 
 st.markdown("""

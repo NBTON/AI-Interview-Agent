@@ -1,9 +1,10 @@
 import streamlit as st
 import requests
+import os
 
 st.set_page_config(page_title="Candidate Verification", page_icon="📝", layout="centered")
 
-API_URL = "http://localhost:8000/api"
+API_URL = os.environ.get("API_URL", "http://localhost:8000/api").rstrip("/")
 
 st.markdown("""
 <style>

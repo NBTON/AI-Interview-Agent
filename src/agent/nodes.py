@@ -16,7 +16,7 @@ from tools import (
 )
 
 def node_init(state: InterviewState) -> dict:
-    print("🚀 [System] Initializing interview session...")
+    print("[System] Initializing interview session...")
     reqs = get_program_requirements()
     
     # Initialize DB candidate registry and session state
@@ -76,7 +76,7 @@ def node_evaluation(state: InterviewState) -> dict:
     reqs = get_program_requirements()
     current_topic = state["current_topic"]
     
-    print(f"🕵️‍♂️ [Evaluation Agent] Evaluating response for topic '{current_topic}'...")
+    print(f"[Evaluation Agent] Evaluating response for topic '{current_topic}'...")
     
     eval_result = evaluate_answer(
         question=state["last_question"],
@@ -103,7 +103,7 @@ def node_evaluation(state: InterviewState) -> dict:
 
 def node_profile_builder(state: InterviewState) -> dict:
     current_topic = state["current_topic"]
-    print(f"🗂️ [Profile Builder Agent] Saving details & updating memory for '{current_topic}'...")
+    print(f"[Profile Builder Agent] Saving details & updating memory for '{current_topic}'...")
     
     scores = normalize_scores_payload(state.get("scores"), state.get("tier_assigned", ""))
     topic_score = scores.get("topic_scores", {}).get(current_topic, {}).get("final_topic_score", 3.0)
@@ -143,7 +143,7 @@ def node_profile_builder(state: InterviewState) -> dict:
         new_covered = state["topics_covered"]
         new_missing = state["missing_info"]
         new_probe_count = state["probe_count"] + 1
-        print(f"🔍 [Profile Builder Agent] Topic '{current_topic}' requires follow-up probing (consecutive probes: {new_probe_count}/{max_probes}).")
+        print(f"[Profile Builder Agent] Topic '{current_topic}' requires follow-up probing (consecutive probes: {new_probe_count}/{max_probes}).")
     else:
         new_covered = list(dict.fromkeys(state["topics_covered"] + [current_topic]))
         if current_topic == "background":
@@ -162,7 +162,7 @@ def node_profile_builder(state: InterviewState) -> dict:
                     "education": "light",
                 }
                 new_missing = [t for t in ["experience", "projects", "skills", "education"] if t not in new_covered]
-                print("🔀 [Branching] Candidate identified as EXPERIENCED. Path: experience -> projects -> skills -> light education.")
+                print("[Branching] Candidate identified as EXPERIENCED. Path: experience -> projects -> skills -> light education.")
             else:
                 # Beginner/student path: cover experience lightly instead of omitting it.
                 topic_depths = {
@@ -173,12 +173,12 @@ def node_profile_builder(state: InterviewState) -> dict:
                     "experience": "light",
                 }
                 new_missing = [t for t in ["education", "skills", "projects", "experience"] if t not in new_covered]
-                print("🔀 [Branching] Candidate identified as BEGINNER/STUDENT. Path: education -> skills -> projects -> light experience.")
+                print("[Branching] Candidate identified as BEGINNER/STUDENT. Path: education -> skills -> projects -> light experience.")
         else:
             new_missing = identify_missing_info(new_covered, state["missing_info"])
             
         new_probe_count = 0
-        print(f"✅ [Profile Builder Agent] Topic '{current_topic}' coverage completed. Next topics remaining: {new_missing}")
+        print(f"[Profile Builder Agent] Topic '{current_topic}' coverage completed. Next topics remaining: {new_missing}")
         
     new_questions = state["questions_asked"] + [state["last_question"]]
     new_answers = state["answers"] + [state["last_answer"]]
@@ -214,7 +214,7 @@ def node_interviewer(state: InterviewState) -> dict:
     
     if state["probe_count"] > 0:
         # Generate follow-up probe question
-        print(f"🎤 [Interviewer Agent] Generating follow-up probing question for topic '{topic}'...")
+        print(f"[Interviewer Agent] Generating follow-up probing question for topic '{topic}'...")
         prev_question = state["questions_asked"][-1] if state["questions_asked"] else state["last_question"]
         prev_answer = state["answers"][-1] if state["answers"] else ""
         question = generate_probe_question(topic, prev_question, prev_answer)
@@ -226,7 +226,7 @@ def node_interviewer(state: InterviewState) -> dict:
             required_topics = reqs.get("required_topics", ["skills", "projects"])
             turn_count = state.get("turn_count", 0)
             topic = required_topics[turn_count % len(required_topics)]
-        print(f"🎤 [Interviewer Agent] Generating fresh question for topic '{topic}'...")
+        print(f"[Interviewer Agent] Generating fresh question for topic '{topic}'...")
         
         # Build context dict with scores and requirements
         context_dict = {
@@ -249,7 +249,7 @@ def node_interviewer(state: InterviewState) -> dict:
 
 
 def node_wrap_up(state: InterviewState) -> dict:
-    print("📊 [Decision Support Agent] Compiling final candidate report and recommendations...")
+    print("[Decision Support Agent] Compiling final candidate report and recommendations...")
     
     report = generate_report(
         session_id=state["session_id"],
@@ -280,11 +280,11 @@ def determine_next_topic_routing(state: InterviewState) -> dict:
         if bg_score >= 4.0:
             tier = "advanced_track"
             skills_limit = 5
-            print(f"🔀 [Adaptive Routing] Background score is {bg_score} >= 4.0. Assigning candidate to 'advanced_track' (up to 5 turns for skills).")
+            print(f"[Adaptive Routing] Background score is {bg_score} >= 4.0. Assigning candidate to 'advanced_track' (up to 5 turns for skills).")
         else:
             tier = "beginner_adaptive"
             skills_limit = 2
-            print(f"🔀 [Adaptive Routing] Background score is {bg_score} < 4.0. Assigning candidate to 'beginner_adaptive' (up to 2 turns for skills).")
+            print(f"[Adaptive Routing] Background score is {bg_score} < 4.0. Assigning candidate to 'beginner_adaptive' (up to 2 turns for skills).")
             
     updated_scores = normalize_scores_payload(scores, tier)
     updated_scores["summary_metrics"]["tier_assigned"] = tier
